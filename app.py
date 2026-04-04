@@ -43,7 +43,11 @@ app.layout = dbc.Container([
                         },
                         multiple=False
                     ),
-                    dcc.Graph(id='volcano-plot', style={'height': '600px'})
+                    dcc.Tabs(id='tabs', value='volcano', children=[
+                        dcc.Tab(label='Volcano Plot', value='volcano'),
+                        dcc.Tab(label='Heatmap', value='heatmap')
+                    ]),
+                    html.Div(id='tab-content')
                 ])
             ], className="shadow-sm")
         ], width=7),
