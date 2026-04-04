@@ -44,10 +44,13 @@ app.layout = dbc.Container([
                         multiple=False
                     ),
                     dcc.Tabs(id='tabs', value='volcano', children=[
-                        dcc.Tab(label='Volcano Plot', value='volcano'),
-                        dcc.Tab(label='Heatmap', value='heatmap')
-                    ]),
-                    html.Div(id='tab-content')
+                        dcc.Tab(label='Volcano Plot', value='volcano', children=[
+                            dcc.Graph(id='volcano-plot', style={'height': '600px'})
+                        ]),
+                        dcc.Tab(label='Heatmap', value='heatmap', children=[
+                            dcc.Graph(id='heatmap', style={'height': '600px'})
+                        ])
+                    ])
                 ])
             ], className="shadow-sm")
         ], width=7),
@@ -76,9 +79,10 @@ app.layout = dbc.Container([
     Output('stored-data', 'data'),
     Output('volcano-plot', 'figure'),
     Input('upload-data', 'contents'),
-    State('upload-data', 'filename')
+    State('upload-data', 'filename'),
+    Input('tabs', 'value')
 )
-def update_output(contents, filename):
+def update_output(contents, filename, tab):
     if contents is None:
         return None, create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']), 'log2FC', 'padj', 'symbol')
     
@@ -118,9 +122,10 @@ def update_output(contents, filename):
     Output('enrichment-table-container', 'children'),
     Output('heatmap', 'figure'),
     Input('volcano-plot', 'selectedData'),
-    State('stored-data', 'data')
+    State('stored-data', 'data'),
+    Input('tabs', 'value')
 )
-def run_enrichment_logic(selectedData, stored_data):
+def run_enrichment_logic(selectedData, stored_data, tab):
     if selectedData is None or not selectedData['points'] or not stored_data:
         return create_pathway_bar_chart(pd.DataFrame()), html.P("Lasso-select genes on the plot to start."), create_heatmap(pd.DataFrame())
     
