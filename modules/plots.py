@@ -1,6 +1,8 @@
 import plotly.graph_objects as go
+from plotly.graph_objects import Heatmap
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thresh=0.05):
     """
