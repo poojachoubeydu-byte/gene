@@ -88,3 +88,19 @@ def create_pathway_bar_chart(enrichment_df):
     )
 
     return fig
+import numpy as np
+from plotly.graph_objects import Heatmap
+from scipy import stats
+
+def create_heatmap(df):
+    """
+    Displays a Z-score normalized heatmap of the input data.
+    """
+    z_scores = stats.zscore(df, axis=1)
+    fig = Heatmap(
+        z=z_scores,
+        colorscale='RdBu_r',
+        reversescale=False,
+        showscale=False
+    )
+    return fig
