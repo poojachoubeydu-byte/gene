@@ -112,12 +112,13 @@ def update_output(contents, filename):
 @app.callback(
     Output('pathway-chart', 'figure'),
     Output('enrichment-table-container', 'children'),
+    Output('heatmap', 'figure'),
     Input('volcano-plot', 'selectedData'),
     State('stored-data', 'data')
 )
 def run_enrichment_logic(selectedData, stored_data):
     if selectedData is None or not selectedData['points'] or not stored_data:
-        return create_pathway_bar_chart(pd.DataFrame()), html.P("Lasso-select genes on the plot to start.")
+        return create_pathway_bar_chart(pd.DataFrame()), html.P("Lasso-select genes on the plot to start."), create_heatmap(pd.DataFrame())
     
     # Extract unique gene symbols from selection
     selected_genes = list(set([point['customdata'] for point in selectedData['points']]))
@@ -126,7 +127,7 @@ def run_enrichment_logic(selectedData, stored_data):
     results_df = engine.run_enrichment(selected_genes)
     
     if results_df.empty:
-        return create_pathway_bar_chart(pd.DataFrame()), html.P("No pathways enriched for these genes.")
+        return create_pathway_bar_chart(pd.DataFrame()), html.P("No pathways enriched for these genes."), create_heatmap(pd.DataFrame())
 
     bar_fig = create_pathway_bar_chart(results_df)
     
@@ -141,7 +142,10 @@ def run_enrichment_logic(selectedData, stored_data):
         style_header={'backgroundColor': '#f8f9fa', 'fontWeight': 'bold'}
     )
     
-    return bar_fig, table
+    df = pd.DataFrame(stored_data)
+    heatmap_fig = create_heatmap(df)
+    
+    return bar_fig, table, heatmap_fig
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=7860)
