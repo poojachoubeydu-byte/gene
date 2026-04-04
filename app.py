@@ -8,7 +8,7 @@ import base64
 import logging
 
 # Import our custom modules
-from modules.plots import create_volcano_plot, create_pathway_bar_chart
+from modules.plots import create_volcano_plot, create_pathway_bar_chart, create_heatmap
 from modules.enrichment import EnrichmentEngine
 
 # Initialize logging for troubleshooting
