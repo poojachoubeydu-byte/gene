@@ -37,7 +37,7 @@ app.layout = dbc.Container([
             dbc.Card([
                 dbc.CardBody([
                     dcc.Upload(
-                        id='upload-data',
+                        id='main-upload-comp',
                         children=html.Div(['Drag and Drop or ', html.A('Select CSV File')]),
                         style={
                             'width': '100%', 'height': '60px', 'lineHeight': '60px',
@@ -48,10 +48,10 @@ app.layout = dbc.Container([
                     ),
                     dcc.Tabs(id='tabs', value='volcano', children=[
                         dcc.Tab(label='Volcano Plot', value='volcano', children=[
-                            dcc.Graph(id='volcano-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
+                            dcc.Graph(id='volcano-graph-obj', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
                         ]),
                         dcc.Tab(label='Heatmap', value='heatmap', children=[
-                            dcc.Graph(id='gene-heatmap-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
+                            dcc.Graph(id='gene-heatmap-obj', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
                         ])
                     ])
                 ])
@@ -65,16 +65,8 @@ app.layout = dbc.Container([
                     dbc.Spinner(
                         id='enrichment-loading',
                         children=[
-                            dcc.Graph(id='pathway-bubble-chart', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'}),
+                            dcc.Graph(id='pathway-bubble-obj', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'}),
                             html.Div(id='enrichment-table-container', className="mt-3")
-                        ],
-                        type="border",
-                        color="primary"
-                    ),
-                    dbc.Spinner(
-                        id='heatmap-loading',
-                        children=[
-                            dcc.Graph(id='gene-heatmap-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'})
                         ],
                         type="border",
                         color="primary"
@@ -84,15 +76,15 @@ app.layout = dbc.Container([
         ], width=5)
     ]),
 
-    dcc.Store(id='stored-data'),
+    dcc.Store(id='dge-data-store'),
     dcc.Store(id='volcano-filter-genes', data=[]) # Store for pathway-filtered genes
 ], fluid=True)
 
 @app.callback(
-    Output('stored-data', 'data'),
-    Output('volcano-plot', 'figure'),
-    Input('upload-data', 'contents'),
-    State('upload-data', 'filename'),
+    Output('dge-data-store', 'data'),
+    Output('volcano-graph-obj', 'figure'),
+    Input('main-upload-comp', 'contents'),
+    State('main-upload-comp', 'filename'),
     Input('tabs', 'value'),
     Input('volcano-filter-genes', 'data') # Pathway-filtered genes
 )
@@ -132,11 +124,11 @@ def update_output(contents, filename, tab, filtered_genes):
         return None, dash.no_update
 
 @app.callback(
-    Output('pathway-bubble-chart', 'figure'),
-    Output('gene-heatmap-plot', 'figure'),
+    Output('pathway-bubble-obj', 'figure'),
+    Output('gene-heatmap-obj', 'figure'),
     Output('enrichment-table-container', 'children'),
-    Input('volcano-plot', 'selectedData'),
-    State('stored-data', 'data')
+    Input('volcano-graph-obj', 'selectedData'),
+    State('dge-data-store', 'data')
 )
 def update_pathway_and_heatmap(selectedData, stored_data):
     if selectedData is None or not selectedData['points'] or not stored_data:
@@ -155,8 +147,8 @@ def update_pathway_and_heatmap(selectedData, stored_data):
 # Reverse Link: Pathway Selection Filters Volcano Plot
 @app.callback(
     Output('volcano-filter-genes', 'data'),
-    Input('pathway-bubble-chart', 'clickData'),
-    State('pathway-bubble-chart', 'figure')
+    Input('pathway-bubble-obj', 'clickData'),
+    State('pathway-bubble-obj', 'figure')
 )
 def filter_volcano_by_pathway(clickData, figure):
     if clickData is None:
