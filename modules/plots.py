@@ -3,6 +3,8 @@ from plotly.graph_objects import Heatmap
 import numpy as np
 import pandas as pd
 from scipy import stats
+import gseapy as gp
+from dash_table import DataTable
 
 def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thresh=0.05, filtered_genes=None):
     """
@@ -64,33 +66,59 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thr
 
     return fig
 
-def create_pathway_bar_chart(enrichment_df):
+def create_pathway_enrichment(selected_genes):
     """
-    Displays the top enriched pathways by significance.
+    Performs pathway enrichment analysis using gseapy and returns a Plotly bubble chart.
     """
-    if enrichment_df.empty:
-        return go.Figure().update_layout(title="No pathways found. Try selecting more genes.")
+    try:
+        enr = gp.enrichr(gene_list=selected_genes, gene_sets=['KEGG_2021_Human'], organism='Human')
+        enrichment_results = enr.results
+        enrichment_results = enrichment_results[enrichment_results['Adjusted P-value'] < 0.05] # Filter for significance
+    except Exception as e:
+        print(f"Enrichment Error: {e}")
+        return go.Figure().update_layout(title="Enrichment Failed"), DataTable(data=[], columns=[])
 
-    # Select top 10 for clarity
-    top_df = enrichment_df.head(10).iloc[::-1] # Reverse for horizontal bar chart
-    
-    fig = go.Figure(go.Bar(
-        x=-np.log10(top_df['adj_p_value']),
-        y=top_df['pathway'],
-        orientation='h',
-        marker=dict(color='#33a02c'),
-        hovertemplate="<b>Pathway:</b> %{y}<br><b>-log10(padj):</b> %{x:.2f}<extra></extra>"
-    ))
+    if enrichment_results.empty:
+        return go.Figure().update_layout(title="No significant pathways found"), DataTable(data=[], columns=[])
+
+    # Create Bubble Chart
+    fig = go.Figure(data=[go.Scatter(
+        x=enrichment_results['Combined Score'],
+        y=enrichment_results['Term'],
+        mode='markers',
+        marker=dict(
+            size=enrichment_results['Overlap'],
+            sizemode='diameter',
+            color=enrichment_results['Adjusted P-value'],
+            colorscale='Viridis',
+            reversescale=True,
+            colorbar=dict(title='Adjusted P-value')
+        ),
+        text=[f"Pathway: {term}<br>Combined Score: {score:.2f}<br>Overlap: {overlap}" for term, score, overlap in zip(enrichment_results['Term'], enrichment_results['Combined Score'], enrichment_results['Overlap'])],
+        hoverinfo='text'
+    )])
 
     fig.update_layout(
-        template='simple_white',
-        title="Top Enriched Pathways",
-        xaxis_title="-log10(Adjusted P-value)",
-        yaxis_title="",
-        margin=dict(l=200, r=20, t=40, b=40)
+        title='Pathway Enrichment Analysis (KEGG)',
+        xaxis_title='Combined Score',
+        yaxis_title='Pathway',
+        template='simple_white'
     )
 
-    return fig
+    table = DataTable(
+        data=enrichment_results.head(10).to_dict('records'),
+        columns=[
+            {"name": "Pathway", "id": "Term"},
+            {"name": "Adj. P-val", "id": "Adjusted P-value", "format": {"specifier": ".2e"}, "type": "numeric"},
+            {"name": "Combined Score", "id": "Combined Score", "format": {"specifier": ".2f"}, "type": "numeric"},
+            {"name": "Overlap", "id": "Overlap", "type": "numeric"}
+        ],
+        style_table={'overflowX': 'auto'},
+        style_cell={'textAlign': 'left', 'padding': '10px', 'fontSize': '12px'},
+        style_header={'backgroundColor': '#f8f9fa', 'fontWeight': 'bold'}
+    )
+
+    return fig, table
 
 def create_heatmap(df, selected_genes):
     """
