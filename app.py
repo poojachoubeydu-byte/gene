@@ -174,7 +174,7 @@ def create_session_id():
 # ── APP INIT ─────────────────────────────────────────────────────────────────
 
 app = dash.Dash(__name__,
-                external_stylesheets=[dbc.themes.FLATLY],
+                external_stylesheets=[],
                 suppress_callback_exceptions=True,
                 meta_tags=[
                     {"name": "viewport", "content": "width=device-width, initial-scale=1"},
