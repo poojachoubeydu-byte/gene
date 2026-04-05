@@ -1,6 +1,8 @@
 import plotly.graph_objects as go
+import plotly.express as px
 import numpy as np
 import pandas as pd
+import networkx as nx
 import gseapy as gp
 from dash import dash_table, html
 
@@ -367,4 +369,168 @@ def create_heatmap(df, selected_genes):
         xanchor='center'
     )
 
+    return fig
+
+
+def create_3d_pca(pca_result):
+    if not pca_result or 'genes' not in pca_result:
+        return go.Figure().update_layout(
+            title='Load data to generate the 3D PCA projection',
+            template='simple_white'
+        )
+
+    df = pd.DataFrame({
+        'gene': pca_result['genes'],
+        'pc1': pca_result['pc1'],
+        'pc2': pca_result['pc2'],
+        'pc3': pca_result['pc3'],
+        'cluster': pca_result['clusters']
+    })
+
+    fig = px.scatter_3d(
+        df,
+        x='pc1', y='pc2', z='pc3',
+        color='cluster',
+        hover_name='gene',
+        opacity=0.8,
+        color_continuous_scale='Spectral',
+        labels={'pc1': 'PC1', 'pc2': 'PC2', 'pc3': 'PC3'}
+    )
+
+    fig.update_traces(marker=dict(size=5), selector=dict(type='scatter3d'))
+    fig.update_layout(
+        template='simple_white',
+        title='3D PCA Projection',
+        margin=dict(l=0, r=0, t=40, b=0),
+        legend_title_text='Cluster'
+    )
+    return fig
+
+
+def create_gsea_bar(gsea_result):
+    if not gsea_result or gsea_result.get('results', pd.DataFrame()).empty:
+        return go.Figure().update_layout(
+            title='Preranked GSEA results unavailable',
+            template='simple_white'
+        )
+
+    results = gsea_result['results'].copy()
+    if results.empty:
+        return go.Figure().update_layout(
+            title='No significant pathways available',
+            template='simple_white'
+        )
+
+    results = results.sort_values('NES', ascending=False).head(12)
+    results['Term_trunc'] = results['Term'].apply(
+        lambda x: x if len(str(x)) <= 45 else str(x)[:42] + '...'
+    )
+
+    fig = go.Figure(data=go.Bar(
+        x=results['NES'],
+        y=results['Term_trunc'],
+        orientation='h',
+        marker=dict(
+            color=results['FDR q-val'],
+            colorscale='RdYlGn',
+            reversescale=True,
+            colorbar=dict(title='FDR q-val')
+        ),
+        text=results['Term'].tolist(),
+        hovertemplate='Pathway: %{text}<br>NES: %{x:.2f}<br>FDR q-val: %{marker.color:.2e}<extra></extra>'
+    ))
+
+    fig.update_layout(
+        template='simple_white',
+        title='Preranked GSEA Pathway Enrichment',
+        xaxis_title='Normalized Enrichment Score (NES)',
+        yaxis_title='',
+        margin=dict(l=240, r=40, t=50, b=40),
+        height=420
+    )
+    return fig
+
+
+def create_network_graph(network_data):
+    if not network_data or 'graph' not in network_data:
+        return go.Figure().update_layout(
+            title='No co-expression network available',
+            template='simple_white'
+        )
+
+    G = network_data['graph']
+    if G.number_of_nodes() == 0:
+        return go.Figure().update_layout(
+            title='No network edges were generated',
+            template='simple_white'
+        )
+
+    pos = nx.spring_layout(G, seed=42)
+    edge_traces = []
+    for edge in G.edges(data=True):
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        edge_traces.append(go.Scatter(
+            x=[x0, x1, None],
+            y=[y0, y1, None],
+            mode='lines',
+            line=dict(width=0.7, color='#888'),
+            hoverinfo='none'
+        ))
+
+    node_trace = go.Scatter(
+        x=[pos[node][0] for node in G.nodes()],
+        y=[pos[node][1] for node in G.nodes()],
+        mode='markers+text',
+        marker=dict(
+            size=6,
+            color=[network_data.get('labels', {}).get(node, 0) for node in G.nodes()],
+            colorscale='Viridis',
+            showscale=False
+        ),
+        text=[node for node in G.nodes()],
+        hovertemplate='<b>%{text}</b><extra></extra>'
+    )
+
+    fig = go.Figure(data=edge_traces + [node_trace])
+    fig.update_layout(
+        template='simple_white',
+        title='WGCNA-lite Co-expression Network',
+        showlegend=False,
+        margin=dict(l=40, r=40, t=50, b=40),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+    )
+    return fig
+
+
+def create_meta_score_bar(df):
+    if df is None or df.empty or 'meta_score' not in df.columns:
+        return go.Figure().update_layout(
+            title='Meta-Score prioritisation will appear here',
+            template='simple_white'
+        )
+
+    top = df.sort_values('meta_score', ascending=False).head(20)
+    fig = go.Figure(data=go.Bar(
+        x=top['meta_score'][::-1],
+        y=top['symbol'][::-1],
+        orientation='h',
+        marker=dict(
+            color=top['meta_score'][::-1],
+            colorscale='RdYlGn',
+            cmin=0,
+            cmax=100
+        ),
+        hovertemplate='Gene: %{y}<br>Meta-Score: %{x:.1f}<extra></extra>'
+    ))
+
+    fig.update_layout(
+        template='simple_white',
+        title='Top Genes by Meta-Score',
+        xaxis_title='Meta-Score',
+        yaxis_title='',
+        margin=dict(l=160, r=40, t=50, b=40),
+        height=380
+    )
     return fig

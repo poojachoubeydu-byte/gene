@@ -8,3 +8,6 @@ requests
 gunicorn
 dash_bootstrap_components
 scipy
+reportlab
+diskcache
+scikit-learn

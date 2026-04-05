@@ -7,7 +7,23 @@ import io, base64, logging, json, hashlib, time
 from datetime import datetime
 from collections import Counter
 import plotly.graph_objects as go
-from modules.plots import create_volcano_plot, create_heatmap, create_pathway_enrichment
+from modules.plots import (
+    create_volcano_plot,
+    create_heatmap,
+    create_pathway_enrichment,
+    create_3d_pca,
+    create_gsea_bar,
+    create_network_graph,
+    create_meta_score_bar
+)
+from modules.analysis import (
+    run_gsea_preranked,
+    run_pca_3d,
+    run_wgcna_lite,
+    compute_meta_score
+)
+from modules.bio_context import fetch_gene_info
+from modules.export import generate_pdf_report, compute_data_integrity_score
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
@@ -78,6 +94,8 @@ def generate_demo_data(n_genes=5000):
     })
 
 DEMO_DF = generate_demo_data(2000)
+DEMO_DF['pvalue'] = DEMO_DF['padj']
+DEMO_DF['baseMean'] = np.random.lognormal(6, 2, len(DEMO_DF))
 
 # ── LOGGING & MONITORING ────────────────────────────────────────────────────
 
@@ -517,6 +535,102 @@ app.layout = dbc.Container([
         ])], className="shadow-sm")
     ], width=12)], className="mb-4"),
 
+    # ── ADVANCED MULTI-OMICS ANALYTICS ─────────────────
+    dbc.Row([dbc.Col([
+        dbc.Card([
+            dbc.CardHeader(html.Div([
+                html.Span("🧬 Advanced Multi-Omics Analytics", style={'fontWeight': '700', 'fontSize': '15px'}),
+                html.Small(" • 3D PCA • WGCNA-lite • Preranked GSEA • Gene metadata • Reporting",
+                           style={'color': '#6c757d', 'fontSize': '11px'})
+            ])),
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.Span("3D PCA Projection", style={'fontWeight': '600', 'fontSize': '13px'}),
+                            html.Small("Clusters inferred from expression signature similarity.",
+                                       style={'color': '#666', 'fontSize': '11px'})
+                        ], style={'marginBottom':'6px'}),
+                        dcc.Loading(
+                            type='circle',
+                            color='#1565c0',
+                            children=dcc.Graph(
+                                id='pca-3d-graph',
+                                config={'displayModeBar': True, 'responsive': True},
+                                style={'height': '360px', 'width': '100%'}
+                            )
+                        )
+                    ], xs=12, sm=12, md=12, lg=4, xl=4),
+                    dbc.Col([
+                        html.Div([
+                            html.Span("Preranked GSEA", style={'fontWeight': '600', 'fontSize': '13px'}),
+                            html.Small("Rank genes by effect size and p-value for pathway discovery.",
+                                       style={'color': '#666', 'fontSize': '11px'})
+                        ], style={'marginBottom':'6px'}),
+                        dcc.Loading(
+                            type='circle',
+                            color='#1565c0',
+                            children=[
+                                dcc.Graph(
+                                    id='gsea-bar-graph',
+                                    config={'displayModeBar': True, 'responsive': True},
+                                    style={'height': '360px', 'width': '100%'}
+                                ),
+                                html.Div(id='gsea-summary', style={'marginTop': '8px', 'fontSize': '12px', 'color': '#444'})
+                            ]
+                        )
+                    ], xs=12, sm=12, md=12, lg=4, xl=4),
+                    dbc.Col([
+                        html.Div([
+                            html.Span("Co-expression Network", style={'fontWeight': '600', 'fontSize': '13px'}),
+                            html.Small("WGCNA-lite module detection from differential expression signal.",
+                                       style={'color': '#666', 'fontSize': '11px'})
+                        ], style={'marginBottom':'6px'}),
+                        dcc.Loading(
+                            type='circle',
+                            color='#1565c0',
+                            children=dcc.Graph(
+                                id='network-graph',
+                                config={'displayModeBar': True, 'responsive': True},
+                                style={'height': '360px', 'width': '100%'}
+                            )
+                        )
+                    ], xs=12, sm=12, md=12, lg=4, xl=4)
+                ]),
+                html.Hr(style={'margin':'16px 0','borderColor':'#e9ecef'}),
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.Span("Meta-Score Prioritisation", style={'fontWeight': '600', 'fontSize': '13px'}),
+                            html.Small("Composite gene ranking combining effect size and significance.",
+                                       style={'color': '#666', 'fontSize': '11px'})
+                        ], style={'marginBottom':'6px'}),
+                        dcc.Graph(
+                            id='meta-score-bar',
+                            config={'displayModeBar': True, 'responsive': True},
+                            style={'height': '320px', 'width': '100%'}
+                        )
+                    ], xs=12, sm=12, md=12, lg=8, xl=8),
+                    dbc.Col([
+                        html.Div([
+                            html.Span("Gene Bio-Context Lookup", style={'fontWeight': '600', 'fontSize': '13px'}),
+                            html.Small("Fetch NCBI/UniProt metadata for selected gene symbols.",
+                                       style={'color': '#666', 'fontSize': '11px'})
+                        ], style={'marginBottom':'6px'}),
+                        dcc.Input(id='gene-search-input', type='text', placeholder='Enter gene symbol', style={'width': '100%', 'marginBottom': '6px'}),
+                        dbc.Button('Lookup Gene Info', id='lookup-gene-btn', color='primary', size='sm', className='mb-2'),
+                        html.Div(id='gene-info-panel', style={'fontSize': '12px', 'color': '#333', 'lineHeight': '1.5'})
+                    ], xs=12, sm=12, md=12, lg=4, xl=4)
+                ]),
+                html.Div([
+                    dbc.Button('Download Analysis Report', id='download-pdf-btn', color='secondary', className='export-btn', n_clicks=0),
+                    html.Span(id='integrity-display', style={'marginLeft': '12px', 'fontSize': '12px', 'color': '#444'})
+                ], style={'marginTop': '12px'})
+            ])
+        ], className='shadow-sm')
+    ], width=12)
+], className='mb-4'),
+
     # ── SESSION INFO & EXPORT ───────────────────────────
     dbc.Row([dbc.Col([
         html.Div(id='session-info', style={'fontSize':'11px','color':'#666','textAlign':'center','marginBottom':'8px'})
@@ -528,6 +642,11 @@ app.layout = dbc.Container([
     dcc.Store(id='volcano-filter-genes', data=[]),
     dcc.Store(id='session-store', data={'session_id': create_session_id(), 'start_time': datetime.now().isoformat()}),
     dcc.Store(id='analysis-metadata', data={}),
+    dcc.Store(id='gsea-store', data={}),
+    dcc.Store(id='pca-store', data={}),
+    dcc.Store(id='network-store', data={}),
+    dcc.Store(id='integrity-store', data={}),
+    dcc.Store(id='ora-params-store', data={}),
     dcc.Download(id='download-results'),
 
 ], fluid=True)
@@ -774,7 +893,75 @@ def update_data_quality_indicators(stored_data, lfc_thresh, p_thresh, analysis_o
     return quality_panel, volcano_stats, heatmap_stats
 
 
-# ── CALLBACK 6: Session Info Display ─────────────────────────────────────────
+# ── CALLBACK 6: Advanced Analytics Computation ───────────────────────────
+
+@app.callback(
+    Output('pca-3d-graph', 'figure'),
+    Output('gsea-bar-graph', 'figure'),
+    Output('network-graph', 'figure'),
+    Output('meta-score-bar', 'figure'),
+    Output('gsea-summary', 'children'),
+    Output('gsea-store', 'data'),
+    Output('pca-store', 'data'),
+    Output('network-store', 'data'),
+    Output('integrity-store', 'data'),
+    Input('dge-data-store', 'data'),
+    Input('lfc-thresh-slider', 'value'),
+    Input('padj-thresh-dd', 'value'),
+    prevent_initial_call=True
+)
+def compute_advanced_analytics(stored_data, lfc_thresh, p_thresh):
+    default_fig = go.Figure().update_layout(template='simple_white')
+    if not stored_data:
+        return default_fig, default_fig, default_fig, default_fig, '', {}, {}, {}, {}
+
+    df = pd.DataFrame(stored_data)
+    if df.empty:
+        return default_fig, default_fig, default_fig, default_fig, 'No data available for advanced analytics.', {}, {}, {}, {}
+
+    meta_df = compute_meta_score(df.copy())
+    pca_result = run_pca_3d(df)
+    gsea_result = run_gsea_preranked(df)
+    network_result = run_wgcna_lite(df)
+    integrity_score = compute_data_integrity_score(df)
+
+    pca_fig = create_3d_pca(pca_result)
+    gsea_fig = create_gsea_bar(gsea_result)
+    network_fig = create_network_graph(network_result)
+    meta_fig = create_meta_score_bar(meta_df)
+
+    if gsea_result.get('error'):
+        gsea_summary_text = html.P(
+            f"Preranked GSEA unavailable: {gsea_result['error']}",
+            style={'color': '#c0392b', 'fontSize': '12px'}
+        )
+    else:
+        pathway_count = len(gsea_result.get('results', pd.DataFrame()))
+        gsea_summary_text = html.P(
+            f"Preranked GSEA computed {pathway_count} significant pathways.",
+            style={'color': '#444', 'fontSize': '12px'}
+        )
+
+    gsea_store_payload = gsea_result.copy()
+    if isinstance(gsea_store_payload.get('results'), pd.DataFrame):
+        gsea_store_payload['results'] = gsea_store_payload['results'].to_dict('records')
+
+    network_store_payload = {k: v for k, v in network_result.items() if k != 'graph'}
+
+    return (
+        pca_fig,
+        gsea_fig,
+        network_fig,
+        meta_fig,
+        gsea_summary_text,
+        gsea_store_payload,
+        pca_result,
+        network_store_payload,
+        integrity_score
+    )
+
+
+# ── CALLBACK 7: Session Info Display ─────────────────────────────────────────
 
 @app.callback(
     Output('session-info', 'children'),
@@ -859,6 +1046,82 @@ def update_upload_style(contents, current_style):
                 'borderColor': '#28a745',
                 'backgroundColor': '#f8fff8'}
     return current_style
+
+
+# ── CALLBACK 9: Advanced Analytics & PDF Report ───────────────────────────
+
+@app.callback(
+    Output('pdf-download', 'data'),
+    Output('integrity-display', 'children'),
+    Input('download-pdf-btn', 'n_clicks'),
+    State('dge-data-store', 'data'),
+    State('gsea-store', 'data'),
+    State('gsea-results-store', 'data'),
+    prevent_initial_call=True
+)
+def generate_analysis_report(n_clicks, data_store, gsea_store, gsea_results):
+    if not n_clicks or not data_store:
+        return dash.no_update, dash.no_update
+
+    df = pd.DataFrame(data_store)
+    if df.empty:
+        return dash.no_update, 'No data loaded to generate report.'
+
+    integrity = compute_data_integrity_score(df)
+    analysis_params = {
+        'lfc_thresh': 1.0,
+        'padj_thresh': 0.05,
+        'gene_sets': ['KEGG_2021_Human', 'Reactome_2022']
+    }
+
+    pdf_bytes = generate_pdf_report(
+        df,
+        integrity,
+        gsea_results if gsea_results else {},
+        gsea_store if gsea_store else {},
+        analysis_params
+    )
+
+    integrity_text = (
+        f"Integrity: {integrity['total']}/100 ({integrity['grade']}) "
+        f"| {integrity['n_significant']} significant genes"
+    )
+
+    return dcc.send_bytes(pdf_bytes, filename=f'analysis_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf'), integrity_text
+
+
+# ── CALLBACK 10: Gene Metadata Lookup ─────────────────────────────────────
+
+@app.callback(
+    Output('gene-info-panel', 'children'),
+    Input('lookup-gene-btn', 'n_clicks'),
+    State('gene-search-input', 'value'),
+    prevent_initial_call=True
+)
+def lookup_gene_metadata(n_clicks, gene_symbol):
+    if not n_clicks or not gene_symbol:
+        return ''
+
+    info = fetch_gene_info(gene_symbol.strip())
+    if not info or 'error' in info:
+        message = info.get('error', 'Gene lookup failed.') if isinstance(info, dict) else 'Gene lookup failed.'
+        return html.Div(message, style={'color': '#c0392b', 'fontSize': '12px'})
+
+    details = [
+        html.P(f"Symbol: {gene_symbol.upper()}", style={'margin': '0 0 4px 0', 'fontWeight': '600'}),
+        html.P(f"Full Name: {info.get('full_name', 'N/A')}", style={'margin': '0 0 4px 0'}),
+        html.P(f"Location: {info.get('location', 'N/A')}", style={'margin': '0 0 4px 0'}),
+        html.P(f"Subcellular Location: {info.get('subcellular_location', 'N/A')}", style={'margin': '0 0 4px 0'}),
+        html.P(f"Function: {info.get('function', 'N/A')}", style={'margin': '0 0 4px 0'}),
+        html.P(f"NCBI ID: {info.get('ncbi_id', 'N/A')} | UniProt ID: {info.get('uniprot_id', 'N/A')}", style={'margin': '0 0 4px 0'})
+    ]
+
+    if info.get('domains'):
+        details.append(html.P(f"Domains: {', '.join(info.get('domains', []))}", style={'margin': '0 0 4px 0'}))
+    if info.get('disease_associations'):
+        details.append(html.P(f"Disease associations: {', '.join(info.get('disease_associations', []))}", style={'margin': '0 0 4px 0'}))
+
+    return html.Div(details, style={'fontSize': '12px', 'lineHeight': '1.4'})
 
 
 if __name__ == '__main__':
