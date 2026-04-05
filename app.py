@@ -65,7 +65,7 @@ app.layout = dbc.Container([
             'borderRadius':'8px',
             'marginBottom':'12px'
         })
-    ], width=12)])
+    ], width=12)]),
 
     # ── ALERT BANNER ────────────────────────────────────
     dbc.Row([dbc.Col([
