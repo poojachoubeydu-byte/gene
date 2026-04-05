@@ -12,7 +12,7 @@ from modules.plots import create_volcano_plot, create_heatmap, create_pathway_en
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-MIN_GENES = 50
+MIN_GENES = 3
 MAX_GENES = 50000
 REQUIRED_COLUMNS = ['gene_symbol', 'log2_fold_change', 'adjusted_p_value']
 
@@ -143,9 +143,10 @@ def validate_deg_data(df):
     if len(df) < original_len:
         warnings.append(f"Removed {original_len - len(df)} rows with missing values")
 
-    # Validate data ranges
-    if (df['adjusted_p_value'] < 0).any() or (df['adjusted_p_value'] > 1).any():
-        errors.append("Adjusted p-values must be between 0 and 1")
+    # Validate data ranges — clip values slightly above 1.0 (floating-point rounding from some tools)
+    df['adjusted_p_value'] = df['adjusted_p_value'].clip(upper=1.0)
+    if (df['adjusted_p_value'] < 0).any():
+        errors.append("Adjusted p-values contain negative values, which is invalid")
 
     if df['log2_fold_change'].abs().max() > 20:
         warnings.append("Extremely large fold changes detected (>20). Please verify data scaling.")
@@ -158,7 +159,9 @@ def validate_deg_data(df):
 
     # Check data size
     if len(df) < MIN_GENES:
-        errors.append(f"Dataset too small: {len(df)} genes. Minimum required: {MIN_GENES}")
+        errors.append(f"Dataset too small: {len(df)} genes (minimum {MIN_GENES} required for any meaningful plot)")
+    elif len(df) < 50:
+        warnings.append(f"Small dataset: {len(df)} genes. Some analyses may be limited.")
 
     if len(df) > MAX_GENES:
         warnings.append(f"Large dataset: {len(df)} genes. Performance may be affected.")
