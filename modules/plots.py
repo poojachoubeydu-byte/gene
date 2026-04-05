@@ -93,7 +93,7 @@ def create_pathway_enrichment(selected_genes):
         enrichment_results = enrichment_results[enrichment_results['Adjusted P-value'] < 0.05].copy() # Filter for significance and create a copy
 
         if enrichment_results.empty:
-            return go.Figure().update_layout(title="No significant pathways found"), dash_table.DataTable(data=[], columns=[]), None
+            return go.Figure().update_layout(title="No significant pathways found"), dash_table.DataTable(data=[], columns=[]), {}
 
         # Fix overlap string and calculate bubble size
         enrichment_results['overlap_count'] = enrichment_results['Overlap'].str.split('/').str[0].astype(int)
@@ -104,10 +104,17 @@ def create_pathway_enrichment(selected_genes):
         # Sort by Combined Score and take top 20
         enrichment_results = enrichment_results.sort_values(by='Combined Score', ascending=False).head(20)
 
+        # Build gene-to-pathway index
+        gene_pathway_index = {}
+        for _, row in enrichment_results.iterrows():
+            pathway = row['Term']
+            genes = row['Genes'].split(';')
+            gene_pathway_index[pathway] = genes
+
 
     except Exception as e:
         print(f"Enrichment Error: {e}")
-        return go.Figure().update_layout(title="Enrichment Failed"), dash_table.DataTable(data=[], columns=[]), None
+        return go.Figure().update_layout(title="Enrichment Failed"), dash_table.DataTable(data=[], columns=[]), {}
 
 
     # Create Bubble Chart
@@ -147,7 +154,7 @@ def create_pathway_enrichment(selected_genes):
         style_header={'backgroundColor': '#f8f9fa', 'fontWeight': 'bold'}
     )
 
-    return fig, table, enrichment_results
+    return fig, table, gene_pathway_index
 
 def create_heatmap(df, selected_genes):
     """

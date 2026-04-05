@@ -65,6 +65,7 @@ app.layout = dbc.Container([
                         color="outline-secondary", size="sm",
                         className="mb-3"
                     ),
+                    dbc.Alert(id='upload-alert', is_open=False, dismissable=True, duration=6000),
                     html.Div(
                         dcc.Upload(
                             id='main-upload-comp',
@@ -144,13 +145,16 @@ app.layout = dbc.Container([
 
     dcc.Store(id='dge-data-store'),
     dcc.Store(id='volcano-filter-genes', data=[]), # Store for pathway-filtered genes
-    dcc.Store(id='gsea-results-store'), # Store for GSEApy enrichment results
+    dcc.Store(id='gsea-results-store', data={}), # Store for GSEApy enrichment results
     dcc.Store(id='gene-pathway-index-store') # Store for gene-pathway reverse index
 ], fluid=True)
 
 @app.callback(
     Output('dge-data-store', 'data'),
     Output('volcano-graph-obj', 'figure'),
+    Output('upload-alert', 'children'),
+    Output('upload-alert', 'color'),
+    Output('upload-alert', 'is_open'),
     Input('main-upload-comp', 'contents'),
     State('main-upload-comp', 'filename'),
     Input('tabs', 'value'),
@@ -162,12 +166,15 @@ app.layout = dbc.Container([
 def update_output(contents, filename, tab, filtered_genes, lfc_thresh, p_thresh, n_clicks):
     ctx = dash.callback_context
     if not ctx.triggered:
-        return None, create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']), 'log2FC', 'padj', 'symbol', filtered_genes=filtered_genes, lfc_thresh=lfc_thresh, p_thresh=p_thresh)
+        return None, create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']), 'log2FC', 'padj', 'symbol', filtered_genes=filtered_genes, lfc_thresh=lfc_thresh, p_thresh=p_thresh), "", "secondary", False
     else:
         trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
     if trigger_id == 'load-demo-btn':
         df = DEMO_DF.copy()
+        alert_message = f"Loaded demo dataset ({len(df)} genes). {len(df[(df['log2FC'] > lfc_thresh) | (df['log2FC'] < -lfc_thresh)])} DEGs at current thresholds."
+        alert_color = "success"
+        alert_open = True
     elif contents is not None:
         try:
             content_type, content_string = contents.split(',')
@@ -180,8 +187,13 @@ def update_output(contents, filename, tab, filtered_genes, lfc_thresh, p_thresh,
             c_gene = next((c for c in df.columns if c.lower() in ['symbol', 'gene', 'gene_symbol', 'id', 'name', 'gene_name']), None)
 
             if not all([c_lfc, c_padj, c_gene]):
-                logger.error(f"Missing Columns. Found: LFC={c_lfc}, P={c_padj}, Gene={c_gene}")
-                return None, dash.no_update
+                missing_cols = [col for col, c in zip(['log2FC', 'padj', 'symbol'], [c_lfc, c_padj, c_gene]) if c is None]
+                found_cols = {col: c for col, c in zip(['log2FC', 'padj', 'symbol'], [c_lfc, c_padj, c_gene]) if c is not None}
+                alert_message = f"Missing columns: {', '.join(missing_cols)}. Found: {found_cols}."
+                alert_color = "danger"
+                alert_open = True
+                logger.error(alert_message)
+                return None, dash.no_update, alert_message, alert_color, alert_open
 
             # 2. Rename and Coerce (Claude-Style Cleanliness)
             df = df.rename(columns={c_lfc: 'log2FC', c_padj: 'padj', c_gene: 'symbol'})
@@ -193,14 +205,23 @@ def update_output(contents, filename, tab, filtered_genes, lfc_thresh, p_thresh,
             # 4. Clean NaN values
             df = df.dropna(subset=['log2FC', 'padj', 'symbol'])
 
+            n = len(df)
+            n_sig = len(df[(df['log2FC'] > lfc_thresh) | (df['log2FC'] < -lfc_thresh)])
+            alert_message = f"Loaded {n} genes. {n_sig} significant DEGs at current thresholds. Use lasso selection on the volcano to explore pathways."
+            alert_color = "success"
+            alert_open = True
+
         except Exception as e:
+            alert_message = f"Error loading data. Please ensure the file is a valid CSV."
+            alert_color = "danger"
+            alert_open = True
             logger.error(f"CRITICAL UPLOAD ERROR: {e}")
-            return None, dash.no_update
+            return None, dash.no_update, alert_message, alert_color, alert_open
     else:
-        return None, create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']), 'log2FC', 'padj', 'symbol', filtered_genes=filtered_genes, lfc_thresh=lfc_thresh, p_thresh=p_thresh)
+        return None, create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']), 'log2FC', 'padj', 'symbol', filtered_genes=filtered_genes, lfc_thresh=lfc_thresh, p_thresh=p_thresh), "", "secondary", False
 
     fig = create_volcano_plot(df, 'log2FC', 'padj', 'symbol', filtered_genes=filtered_genes, lfc_thresh=lfc_thresh, p_thresh=p_thresh)
-    return df.to_dict('records'), fig
+    return df.to_dict('records'), fig, alert_message, alert_color, alert_open
 
 @app.callback(
     Output('pathway-bubble-obj', 'figure'),
@@ -214,37 +235,25 @@ def update_output(contents, filename, tab, filtered_genes, lfc_thresh, p_thresh,
 def update_pathway_and_heatmap(selectedData, stored_data):
     if selectedData is None or not selectedData['points'] or not stored_data:
         empty_fig = go.Figure().update_layout(title="Instruction: Please select genes on the volcano plot to see enrichment")
-        return empty_fig, create_heatmap(pd.DataFrame(), []), html.P("Instruction: Please select genes on the volcano plot to see enrichment"), None, None
+        return empty_fig, create_heatmap(pd.DataFrame(), []), html.P("Instruction: Please select genes on the volcano plot to see enrichment"), {}, None
 
     # Extract gene symbols from selected data
     selected_genes = [point['customdata'] for point in selectedData['points'] if 'customdata' in point]
     selected_genes = list(set(selected_genes))
 
     # Create pathway enrichment bubble chart and heatmap
-    pathway_chart, enrichment_table, enrichment_results = create_pathway_enrichment(selected_genes)
+    pathway_chart, enrichment_table, gene_pathway_index = create_pathway_enrichment(selected_genes)
     heatmap = create_heatmap(pd.DataFrame.from_dict(stored_data), selected_genes)
 
-    # Build gene-to-pathway reverse index
-    gene_pathway_index = {}
-    if enrichment_results is not None:
-        for _, row in enrichment_results.iterrows():
-            pathway = row['Term']
-            genes = row['Genes'].split(';')
-            for gene in genes:
-                if gene not in gene_pathway_index:
-                    gene_pathway_index[gene] = []
-                gene_pathway_index[gene].append(pathway)
-
-    return pathway_chart, heatmap, enrichment_table, enrichment_results.to_json(orient='split'), gene_pathway_index
+    return pathway_chart, heatmap, enrichment_table, gene_pathway_index, gene_pathway_index
 
 # Reverse Link: Pathway Selection Filters Volcano Plot
 @app.callback(
     Output('volcano-filter-genes', 'data'),
     Input('pathway-bubble-obj', 'clickData'),
-    State('gsea-results-store', 'data'),
-    State('gene-pathway-index-store', 'data')
+    State('gsea-results-store', 'data')
 )
-def filter_volcano_by_pathway(clickData, gsea_results, gene_pathway_index):
+def filter_volcano_by_pathway(clickData, gsea_results):
     if clickData is None:
         return []
 
@@ -253,8 +262,8 @@ def filter_volcano_by_pathway(clickData, gsea_results, gene_pathway_index):
 
     clicked_pathway = clickData['points'][0]['y']  # Get the clicked pathway name
 
-    # Extract gene lists from the stored gene-pathway index
-    filtered_genes = [gene for gene, pathways in gene_pathway_index.items() if clicked_pathway in pathways]
+    # Extract gene lists from the stored gsea_results
+    filtered_genes = gsea_results.get(clicked_pathway, [])
 
     return filtered_genes
 
