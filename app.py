@@ -660,7 +660,6 @@ app.layout = dbc.Container([
     dcc.Store(id='integrity-store', data={}),
     dcc.Store(id='ora-params-store', data={}),
     dcc.Download(id='download-results'),
-    dcc.Download(id='pdf-download'),
 
 ], fluid=True)
 
@@ -1070,7 +1069,7 @@ def update_upload_style(contents, current_style):
 # ── CALLBACK 9: Advanced Analytics & PDF Report ───────────────────────────
 
 @app.callback(
-    Output('pdf-download', 'data'),
+    Output('download-results', 'data'),
     Output('integrity-display', 'children'),
     Input('download-pdf-btn', 'n_clicks'),
     State('dge-data-store', 'data'),
