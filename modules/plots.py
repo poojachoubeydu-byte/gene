@@ -31,7 +31,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thr
 
     for status, color in color_map.items():
         sub = d[d['status'] == status]
-        # No change needed here, this line is already correct
+        fig.add_trace(go.Scattergl(x=sub[logfc_col], y=sub['minus_log10_p'], mode='markers', marker=dict(color=color), customdata=sub[gene_col]))
 
     # Add threshold lines
     fig.add_hline(y=-np.log10(p_thresh), line_dash="dash", line_color="black", opacity=0.5)
