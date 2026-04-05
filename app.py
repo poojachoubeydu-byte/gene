@@ -660,6 +660,7 @@ app.layout = dbc.Container([
     dcc.Store(id='integrity-store', data={}),
     dcc.Store(id='ora-params-store', data={}),
     dcc.Download(id='download-results'),
+    dcc.Download(id='pdf-download'),
 
 ], fluid=True)
 
