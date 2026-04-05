@@ -92,27 +92,41 @@ def create_pathway_bar_chart(enrichment_df):
 
     return fig
 
-def create_heatmap(df):
+def create_heatmap(df, selected_genes):
     """
-    Displays a Z-score normalized heatmap of the input data.
+    Displays a Z-score normalized heatmap of the selected genes.
     """
-    if df.empty:
-        return go.Figure().update_layout(title="No data to display")
+    if df.empty or not selected_genes:
+        return go.Figure().update_layout(title="No data or genes selected")
     
     try:
-        numeric_df = df.select_dtypes(include=np.number)
+        # Filter the DataFrame for selected genes
+        filtered_df = df[df['symbol'].isin(selected_genes)]
+        
+        # Select only numeric columns for Z-score calculation
+        numeric_df = filtered_df.select_dtypes(include=np.number)
+        
+        # Calculate Z-scores for each gene (row)
         z_scores = stats.zscore(numeric_df, axis=1, nan_policy='omit')
         
+        # Create the heatmap
         fig = go.Figure(data=go.Heatmap(
             z=z_scores,
             colorscale='RdBu_r',
             reversescale=True,
             showscale=True,
-            colorbar=dict(title='Z-score')
+            colorbar=dict(title='Z-score'),
+            
+            # Add gene symbols as row labels (optional)
+            yaxis=dict(
+                title='Genes',
+                tickvals=list(range(len(filtered_df))),
+                ticktext=filtered_df['symbol'].tolist()
+            )
         ))
         
         fig.update_layout(
-            title='Z-score Normalized Heatmap',
+            title='Z-score Normalized Heatmap of Selected Genes',
             xaxis_title='Samples',
             yaxis_title='Genes',
             template='simple_white',

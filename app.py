@@ -69,7 +69,7 @@ app.layout = dbc.Container([
                         id="loading-enrichment",
                         type="default",
                         children=[
-                            dcc.Graph(id='pathway-chart', style={'height': '400px'}),
+                            dcc.Graph(id='pathway-chart', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'}),
                             html.Div(id='enrichment-table-container', className="mt-3")
                         ]
                     )
@@ -135,7 +135,7 @@ def update_output(contents, filename, tab, filtered_genes):
 )
 def update_enrichment(selectedData, stored_data, tab):
     if selectedData is None or not selectedData['points'] or not stored_data:
-        return go.Figure().update_layout(title="Select genes on the Volcano plot"), html.P("Lasso-select genes on the plot to start."), create_heatmap(pd.DataFrame())
+        return go.Figure().update_layout(title="Select genes on the Volcano plot"), html.P("Lasso-select genes on the plot to start."), create_heatmap(pd.DataFrame(), [])
     
     # Extract unique gene symbols from selection
     genes = [p['customdata'] for p in selectedData['points'] if 'customdata' in p]
@@ -148,10 +148,10 @@ def update_enrichment(selectedData, stored_data, tab):
         enrichment_results = enrichment_results[enrichment_results['Adjusted P-value'] < 0.05] # Filter for significance
     except Exception as e:
         logger.error(f"Enrichment Error: {e}")
-        return go.Figure().update_layout(title="Enrichment Failed"), html.P("Enrichment analysis failed."), create_heatmap(pd.DataFrame())
+        return go.Figure().update_layout(title="Enrichment Failed"), html.P("Enrichment analysis failed."), create_heatmap(pd.DataFrame(), [])
 
     if enrichment_results.empty:
-        return go.Figure().update_layout(title="No significant pathways found"), html.P("No pathways enriched for these genes."), create_heatmap(pd.DataFrame())
+        return go.Figure().update_layout(title="No significant pathways found"), html.P("No pathways enriched for these genes."), create_heatmap(pd.DataFrame(), [])
 
     # Create Bubble Chart
     fig = go.Figure(data=[go.Scatter(
@@ -178,7 +178,7 @@ def update_enrichment(selectedData, stored_data, tab):
     )
     
     df = pd.DataFrame(stored_data)
-    heatmap_fig = create_heatmap(df)
+    heatmap_fig = create_heatmap(df, selected_genes)
 
     table = dash_table.DataTable(
         data=enrichment_results.head(10).to_dict('records'),
@@ -205,25 +205,23 @@ def filter_volcano_by_pathway(clickData, figure):
     if clickData is None:
         return []
 
+    if 'points' not in clickData or not clickData['points']:
+        return []
+
     clicked_pathway = clickData['points'][0]['y']  # Get the clicked pathway name
-    
-    # Extract the enrichment results from the figure's data (assuming it's stored there)
-    # This part depends on how you structure your enrichment results.  For now, I'm assuming
-    # the 'figure' contains the original enrichment_results DataFrame.  You might need to adjust
-    # this based on your actual implementation.
-    
-    # This is a placeholder - replace with your actual logic to retrieve the genes
-    # associated with the clicked_pathway.  For example, you might have a dictionary
-    # mapping pathway names to lists of genes.
-    
-    # Placeholder:
-    pathway_to_genes = {
-        "Glycolysis / Gluconeogenesis": ["gene1", "gene2", "gene3"],
-        "Citrate cycle (TCA cycle)": ["gene4", "gene5", "gene6"]
-    }
-    
+
+    # Extract gene lists from the gseapy results
+    try:
+        enr = gp.enrichr(gene_list=["placeholder"], gene_sets=['KEGG_2021_Human'], organism='Human')
+        pathway_to_genes = {}
+        for term in enr.results['Term']:
+            pathway_to_genes[term] = enr.results[enr.results['Term'] == term]['Genes'].iloc[0].split(";")
+    except Exception as e:
+        logger.error(f"Error extracting gene lists from gseapy results: {e}")
+        return []
+
     filtered_genes = pathway_to_genes.get(clicked_pathway, [])
-    
+
     return filtered_genes
 
 if __name__ == '__main__':
