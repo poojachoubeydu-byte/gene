@@ -51,7 +51,7 @@ app.layout = dbc.Container([
                             dcc.Graph(id='volcano-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
                         ]),
                         dcc.Tab(label='Heatmap', value='heatmap', children=[
-                            dcc.Graph(id='gene-heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
+                            dcc.Graph(id='gene-heatmap-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
                         ])
                     ])
                 ])
@@ -63,16 +63,18 @@ app.layout = dbc.Container([
                 dbc.CardHeader(html.H4("Pathway Enrichment", className="mb-0")),
                 dbc.CardBody([
                     dbc.Spinner(
+                        id='enrichment-loading',
                         children=[
-                            dcc.Graph(id='pathway-chart', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'}),
+                            dcc.Graph(id='pathway-bubble-chart', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'}),
                             html.Div(id='enrichment-table-container', className="mt-3")
                         ],
                         type="border",
                         color="primary"
                     ),
                     dbc.Spinner(
+                        id='heatmap-loading',
                         children=[
-                            dcc.Graph(id='gene-heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'})
+                            dcc.Graph(id='gene-heatmap-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'})
                         ],
                         type="border",
                         color="primary"
@@ -130,8 +132,8 @@ def update_output(contents, filename, tab, filtered_genes):
         return None, dash.no_update
 
 @app.callback(
-    Output('pathway-chart', 'figure'),
-    Output('gene-heatmap', 'figure'),
+    Output('pathway-bubble-chart', 'figure'),
+    Output('gene-heatmap-plot', 'figure'),
     Output('enrichment-table-container', 'children'),
     Input('volcano-plot', 'selectedData'),
     State('stored-data', 'data')
@@ -153,8 +155,8 @@ def update_pathway_and_heatmap(selectedData, stored_data):
 # Reverse Link: Pathway Selection Filters Volcano Plot
 @app.callback(
     Output('volcano-filter-genes', 'data'),
-    Input('pathway-chart', 'clickData'),
-    State('pathway-chart', 'figure')
+    Input('pathway-bubble-chart', 'clickData'),
+    State('pathway-bubble-chart', 'figure')
 )
 def filter_volcano_by_pathway(clickData, figure):
     if clickData is None:
