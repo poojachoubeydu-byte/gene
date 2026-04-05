@@ -210,6 +210,18 @@ app = dash.Dash(__name__,
 
 server = app.server
 
+@server.after_request
+def set_security_headers(response):
+    # Only list currently recognised Permissions-Policy features to silence
+    # "Unrecognized feature" browser warnings caused by deprecated names.
+    response.headers['Permissions-Policy'] = (
+        'camera=(), microphone=(), geolocation=(), payment=()'
+    )
+    # Allow cross-origin storage so Edge Tracking Prevention doesn't block
+    # the Dash session cookie when the app is embedded in an iframe.
+    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin-allow-popups'
+    return response
+
 # Enhanced CSS with accessibility and modern styling
 app.index_string = app.index_string.replace(
     '</head>',
@@ -915,50 +927,56 @@ def compute_advanced_analytics(stored_data, lfc_thresh, p_thresh):
     if not stored_data:
         return default_fig, default_fig, default_fig, default_fig, '', {}, {}, {}, {}
 
-    df = pd.DataFrame(stored_data)
-    if df.empty:
-        return default_fig, default_fig, default_fig, default_fig, 'No data available for advanced analytics.', {}, {}, {}, {}
+    try:
+        df = pd.DataFrame(stored_data)
+        if df.empty:
+            return default_fig, default_fig, default_fig, default_fig, 'No data available for advanced analytics.', {}, {}, {}, {}
 
-    meta_df = compute_meta_score(df.copy())
-    pca_result = run_pca_3d(df)
-    gsea_result = run_gsea_preranked(df)
-    network_result = run_wgcna_lite(df)
-    integrity_score = compute_data_integrity_score(df)
+        meta_df = compute_meta_score(df.copy())
+        pca_result = run_pca_3d(df)
+        gsea_result = run_gsea_preranked(df)
+        network_result = run_wgcna_lite(df)
+        integrity_score = compute_data_integrity_score(df)
 
-    pca_fig = create_3d_pca(pca_result)
-    gsea_fig = create_gsea_bar(gsea_result)
-    network_fig = create_network_graph(network_result)
-    meta_fig = create_meta_score_bar(meta_df)
+        pca_fig = create_3d_pca(pca_result)
+        gsea_fig = create_gsea_bar(gsea_result)
+        network_fig = create_network_graph(network_result)
+        meta_fig = create_meta_score_bar(meta_df)
 
-    if gsea_result.get('error'):
-        gsea_summary_text = html.P(
-            f"Preranked GSEA unavailable: {gsea_result['error']}",
-            style={'color': '#c0392b', 'fontSize': '12px'}
+        if gsea_result.get('error'):
+            gsea_summary_text = html.P(
+                f"Preranked GSEA unavailable: {gsea_result['error']}",
+                style={'color': '#c0392b', 'fontSize': '12px'}
+            )
+        else:
+            pathway_count = len(gsea_result.get('results', pd.DataFrame()))
+            gsea_summary_text = html.P(
+                f"Preranked GSEA computed {pathway_count} significant pathways.",
+                style={'color': '#444', 'fontSize': '12px'}
+            )
+
+        gsea_store_payload = gsea_result.copy()
+        if isinstance(gsea_store_payload.get('results'), pd.DataFrame):
+            gsea_store_payload['results'] = gsea_store_payload['results'].to_dict('records')
+
+        network_store_payload = {k: v for k, v in network_result.items() if k != 'graph'}
+
+        return (
+            pca_fig,
+            gsea_fig,
+            network_fig,
+            meta_fig,
+            gsea_summary_text,
+            gsea_store_payload,
+            pca_result,
+            network_store_payload,
+            integrity_score
         )
-    else:
-        pathway_count = len(gsea_result.get('results', pd.DataFrame()))
-        gsea_summary_text = html.P(
-            f"Preranked GSEA computed {pathway_count} significant pathways.",
-            style={'color': '#444', 'fontSize': '12px'}
-        )
-
-    gsea_store_payload = gsea_result.copy()
-    if isinstance(gsea_store_payload.get('results'), pd.DataFrame):
-        gsea_store_payload['results'] = gsea_store_payload['results'].to_dict('records')
-
-    network_store_payload = {k: v for k, v in network_result.items() if k != 'graph'}
-
-    return (
-        pca_fig,
-        gsea_fig,
-        network_fig,
-        meta_fig,
-        gsea_summary_text,
-        gsea_store_payload,
-        pca_result,
-        network_store_payload,
-        integrity_score
-    )
+    except Exception as e:
+        logger.error(f"Advanced analytics error: {e}", exc_info=True)
+        err_msg = html.P(f"Analytics error: {str(e)[:200]}",
+                         style={'color': '#c0392b', 'fontSize': '12px'})
+        return default_fig, default_fig, default_fig, default_fig, err_msg, {}, {}, {}, {}
 
 
 # ── CALLBACK 7: Session Info Display ─────────────────────────────────────────

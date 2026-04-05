@@ -72,7 +72,8 @@ def run_pca_3d(df, n_clusters=3):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    pca = PCA(n_components=3)
+    n_components = min(3, len(features), X_scaled.shape[0])
+    pca = PCA(n_components=n_components)
     coords = pca.fit_transform(X_scaled)
     if coords.shape[1] < 3:
         padding = np.zeros((coords.shape[0], 3 - coords.shape[1]))
@@ -88,12 +89,13 @@ def run_pca_3d(df, n_clusters=3):
         'pc3': coords[:, 2].tolist(),
         'clusters': clusters.tolist(),
         'genes': df['symbol'].tolist(),
-        'explained_variance': [round(float(v) * 100, 1) for v in pca.explained_variance_ratio_],
+        'explained_variance': ([round(float(v) * 100, 1) for v in pca.explained_variance_ratio_]
+                               + [0.0] * (3 - n_components)),
         'n_clusters': n_clust
     }
 
 
-def run_wgcna_lite(df, n_clusters=5):
+def run_wgcna_lite(df, n_clusters=5, max_genes=500):
     if len(df) < 6:
         return {
             'error': 'Minimum 6 genes required for WGCNA-lite',
@@ -105,6 +107,10 @@ def run_wgcna_lite(df, n_clusters=5):
         }
 
     df = df.copy()
+    # Cap gene count to keep correlation matrix and nested loop tractable
+    if len(df) > max_genes:
+        df = df.nlargest(max_genes, 'log2FC').reset_index(drop=True)
+
     df['-log10p'] = -np.log10(df['padj'].clip(lower=1e-300))
     X = df[['log2FC', '-log10p']].fillna(0).values
     corr_matrix = np.corrcoef(X)
