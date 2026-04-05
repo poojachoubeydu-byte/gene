@@ -10,7 +10,7 @@ import gseapy as gp
 import plotly.graph_objects as go
 
 # Import our custom modules
-from modules.plots import create_volcano_plot, create_heatmap
+from modules.plots import create_volcano_plot, create_heatmap, create_pathway_enrichment # Import create_pathway_enrichment
 
 # Initialize logging for troubleshooting
 logging.basicConfig(level=logging.INFO)
