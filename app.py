@@ -1082,31 +1082,40 @@ def generate_analysis_report(n_clicks, data_store, gsea_store, gsea_results):
     if not n_clicks or not data_store:
         return dash.no_update, dash.no_update
 
-    df = pd.DataFrame(data_store)
-    if df.empty:
-        return dash.no_update, 'No data loaded to generate report.'
+    try:
+        df = pd.DataFrame(data_store)
+        if df.empty:
+            return dash.no_update, 'No data loaded to generate report.'
 
-    integrity = compute_data_integrity_score(df)
-    analysis_params = {
-        'lfc_thresh': 1.0,
-        'padj_thresh': 0.05,
-        'gene_sets': ['KEGG_2021_Human', 'Reactome_2022']
-    }
+        integrity = compute_data_integrity_score(df)
+        analysis_params = {
+            'lfc_thresh': 1.0,
+            'padj_thresh': 0.05,
+            'gene_sets': ['KEGG_2021_Human', 'Reactome_2022']
+        }
 
-    pdf_bytes = generate_pdf_report(
-        df,
-        integrity,
-        gsea_results if gsea_results else {},
-        gsea_store if gsea_store else {},
-        analysis_params
-    )
+        pdf_bytes = generate_pdf_report(
+            df,
+            integrity,
+            gsea_results if gsea_results else {},
+            gsea_store if gsea_store else {},
+            analysis_params
+        )
 
-    integrity_text = (
-        f"Integrity: {integrity['total']}/100 ({integrity['grade']}) "
-        f"| {integrity['n_significant']} significant genes"
-    )
+        integrity_text = (
+            f"Integrity: {integrity['total']}/100 ({integrity['grade']}) "
+            f"| {integrity['n_significant']} significant genes"
+        )
 
-    return dcc.send_bytes(pdf_bytes, filename=f'analysis_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf'), integrity_text
+        return (
+            dcc.send_bytes(pdf_bytes,
+                           filename=f'analysis_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf'),
+            integrity_text
+        )
+
+    except Exception as e:
+        logger.error(f"PDF report error: {e}", exc_info=True)
+        return dash.no_update, f"Report generation failed: {str(e)[:200]}"
 
 
 # ── CALLBACK 10: Gene Metadata Lookup ─────────────────────────────────────
