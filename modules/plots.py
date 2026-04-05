@@ -49,6 +49,12 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 "Log2FC: %{x:.3f}<br>"
                 "-log10(padj): %{y:.3f}"
                 "<extra></extra>"
+            ),
+            selected=dict(
+                marker=dict(opacity=1.0, size=8)
+            ),
+            unselected=dict(
+                marker=dict(opacity=0.25, size=5, color=color)
             )
         ))
 
@@ -157,6 +163,22 @@ def create_pathway_enrichment(selected_genes):
     # ── Sort and limit ───────────────────────────────────
     results = results.sort_values('Combined Score', ascending=False).head(20)
 
+    # ── Normalise Combined Score to 0-100 range for display ──
+    # Raw Enrichr Combined Score scale varies by gseapy version.
+    cs_max = results['Combined Score'].max()
+    if cs_max > 1000:
+        results['Combined Score Display'] = (
+            results['Combined Score'] / cs_max * 100
+        ).round(1)
+        score_col = 'Combined Score Display'
+        xaxis_label = 'Normalised Combined Score (0–100)'
+    else:
+        score_col = 'Combined Score'
+        xaxis_label = 'Combined Score'
+
+    # ── Truncate long pathway names ──────────────────────
+    results['Term_display'] = results['Term'].str[:55]
+
     # ── Build gene index dict ────────────────────────────
     gene_index_dict = {}
     for _, row in results.iterrows():
@@ -167,8 +189,8 @@ def create_pathway_enrichment(selected_genes):
     neg_log_p = -np.log10(results['Adjusted P-value'].clip(lower=1e-300))
 
     fig = go.Figure(data=[go.Scatter(
-        x=results['Combined Score'],
-        y=results['Term'],
+        x=results[score_col],
+        y=results['Term_display'],
         mode='markers',
         marker=dict(
             size=results['bubble_size'].tolist(),
@@ -193,29 +215,33 @@ def create_pathway_enrichment(selected_genes):
     fig.update_layout(
         title=dict(text='Pathway Enrichment (KEGG + Reactome)',
                    font=dict(size=13)),
-        xaxis_title='Combined Score',
+        xaxis_title=xaxis_label,
         yaxis_title='',
         template='simple_white',
-        margin=dict(l=220, r=20, t=60, b=40),
+        margin=dict(l=300, r=20, t=50, b=40),
         height=480,
-        yaxis=dict(tickfont=dict(size=10))
+        yaxis=dict(
+            tickfont=dict(size=9),
+            automargin=True,
+            tickmode='array'
+        )
     )
 
     # ── Table ─────────────────────────────────────────────
-    table_cols = ['Term', 'Overlap', 'Adjusted P-value', 'Combined Score']
+    table_cols_base = ['Term', 'Overlap', 'Adjusted P-value']
     if 'Gene_set' in results.columns:
-        table_cols = ['Term', 'Gene_set', 'Overlap',
-                      'Adjusted P-value', 'Combined Score']
+        table_cols_base = ['Term', 'Gene_set', 'Overlap', 'Adjusted P-value']
+    table_cols_present = table_cols_base + [score_col]
 
     table = dash_table.DataTable(
-        data=results[table_cols].head(10).to_dict('records'),
+        data=results[table_cols_present].head(10).to_dict('records'),
         columns=[
             {'name': 'Pathway',    'id': 'Term'},
             {'name': 'Database',   'id': 'Gene_set'},
             {'name': 'Overlap',    'id': 'Overlap'},
             {'name': 'Adj. P-val', 'id': 'Adjusted P-value',
              'type': 'numeric', 'format': {'specifier': '.2e'}},
-            {'name': 'Score',      'id': 'Combined Score',
+            {'name': 'Score',      'id': score_col,
              'type': 'numeric', 'format': {'specifier': '.1f'}},
         ],
         style_table={'overflowX': 'auto', 'maxHeight': '220px',
@@ -267,7 +293,10 @@ def create_heatmap(df, selected_genes):
     y_labels = filtered['symbol'].tolist()
     customdata = filtered[['symbol', 'log2FC', 'padj']].values.tolist()
 
-    lfc_abs_max = min(6, filtered['log2FC'].abs().max())
+    # Use actual data range — do not clamp artificially.
+    # Symmetric scale centered at 0 preserves relative differences.
+    actual_max = float(filtered['log2FC'].abs().max())
+    lfc_abs_max = actual_max if actual_max > 0 else 1.0
 
     fig = go.Figure(data=go.Heatmap(
         z=z,
@@ -297,7 +326,7 @@ def create_heatmap(df, selected_genes):
             font=dict(size=12)
         ),
         template='simple_white',
-        margin=dict(l=150, r=20, t=50, b=30),
+        margin=dict(l=160, r=30, t=50, b=30),
         yaxis=dict(tickfont=dict(size=10), automargin=True),
         xaxis=dict(showticklabels=False)
     )
