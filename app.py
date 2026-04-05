@@ -18,8 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize the Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
-server = app.server
-
+server = app.server # Add server = app.server
 # Fix for Plotly modebar being unclickable
 app.index_string = app.index_string.replace('</head>', '<style>.js-plotly-plot .plotly .modebar { z-index: 1001 !important; pointer-events: all !important; }</style></head>')
 

@@ -1,15 +1,19 @@
 FROM python:3.11-slim
 
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev
+
+# Copy the current directory
+COPY . /app
+
+# Set working directory
 WORKDIR /app
 
-# Install dependencies
-COPY requirements.txt .
+# Install requirements
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
-
+# Expose port
 EXPOSE 7860
 
-# Command to run the app
-CMD ["python", "app.py"]
+# Start the app using gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:7860", "app:server"]
