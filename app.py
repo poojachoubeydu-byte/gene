@@ -535,7 +535,7 @@ app.layout = dbc.Container([
     Output('main-alert', 'children'),
     Output('main-alert', 'color'),
     Output('main-alert', 'is_open'),
-    Output('onboarding-hint', 'is_open'),
+    Output('help-panel', 'is_open'),
     Input('main-upload-comp', 'contents'),
     Input('load-demo-btn', 'n_clicks'),
     Input('lfc-thresh-slider', 'value'),
@@ -838,19 +838,7 @@ def export_analysis_results(n_clicks, data_store, gsea_results, selected_genes, 
     )
 
 
-# ── CALLBACK 8: Help Panel Toggle ───────────────────────────────────────────
-
-@app.callback(
-    Output('help-panel', 'is_open'),
-    Input('dge-data-store', 'data'),
-    prevent_initial_call=True
-)
-def toggle_help_panel(data_store):
-    # Hide help panel when data is loaded
-    return data_store is None
-
-
-# ── CALLBACK 9: Enhanced Upload Validation ──────────────────────────────────
+# ── CALLBACK 8: Enhanced Upload Validation ──────────────────────────────────
 
 @app.callback(
     Output('main-upload-comp', 'style'),
