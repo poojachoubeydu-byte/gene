@@ -95,7 +95,7 @@ def run_pca_3d(df, n_clusters=3):
     }
 
 
-def run_wgcna_lite(df, n_clusters=5, max_genes=500):
+def run_wgcna_lite(df, n_clusters=5, max_genes=120):
     if len(df) < 6:
         return {
             'error': 'Minimum 6 genes required for WGCNA-lite',
@@ -112,6 +112,9 @@ def run_wgcna_lite(df, n_clusters=5, max_genes=500):
         df = df.nlargest(max_genes, 'log2FC').reset_index(drop=True)
 
     df['-log10p'] = -np.log10(df['padj'].clip(lower=1e-300))
+    df['network_score'] = (np.abs(df['log2FC']) * df['-log10p']).fillna(0)
+    df = df.sort_values('network_score', ascending=False).head(min(max_genes, len(df)))
+
     X = df[['log2FC', '-log10p']].fillna(0).values
     corr_matrix = np.corrcoef(X)
 
@@ -122,10 +125,21 @@ def run_wgcna_lite(df, n_clusters=5, max_genes=500):
     genes = df['symbol'].tolist()
     G = nx.Graph()
     G.add_nodes_from(genes)
+
+    edge_threshold = 0.92 if len(genes) > 50 else 0.7
+    edge_list = []
     for i in range(len(genes)):
         for j in range(i + 1, len(genes)):
-            if abs(corr_matrix[i, j]) > 0.7:
-                G.add_edge(genes[i], genes[j], weight=float(corr_matrix[i, j]))
+            corr = corr_matrix[i, j]
+            if abs(corr) > edge_threshold:
+                edge_list.append((genes[i], genes[j], float(corr)))
+
+    edge_list = sorted(edge_list, key=lambda x: abs(x[2]), reverse=True)
+    if len(edge_list) > 3000:
+        edge_list = edge_list[:3000]
+
+    for source, target, weight in edge_list:
+        G.add_edge(source, target, weight=weight)
 
     modules = {}
     for gene, label in zip(genes, labels):

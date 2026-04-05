@@ -260,7 +260,7 @@ app.layout = dbc.Container([
                    style={'color':'rgba(255,255,255,0.82)',
                           'marginBottom':0,'fontSize':'11px'}),
             html.Div([
-                html.Span("v2.1.0", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'}),
+                html.Span("v3.0.0", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'}),
                 html.Span(" • ", style={'margin':'0 8px','color':'rgba(255,255,255,0.4)'}),
                 html.Span("Real-time statistical validation", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'})
             ], style={'marginTop':'4px'})
