@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thresh=0.05):
+def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thresh=0.05, filtered_genes=None):
     """
     Generates a production-grade interactive volcano plot.
     Optimized for Lasso selection and high-speed WebGL rendering.
@@ -31,7 +31,19 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thr
 
     for status, color in color_map.items():
         sub = d[d['status'] == status]
-        fig.add_trace(go.Scattergl(x=sub[logfc_col], y=sub['minus_log10_p'], mode='markers', marker=dict(color=color), customdata=sub[gene_col]))
+        
+        # Apply filtering if filtered_genes is provided
+        if filtered_genes:
+            sub = sub[sub[gene_col].isin(filtered_genes)]
+        
+        fig.add_trace(go.Scattergl(
+            x=sub[logfc_col], 
+            y=sub['minus_log10_p'], 
+            mode='markers', 
+            marker=dict(color=color), 
+            customdata=sub[gene_col], # Add gene symbols to customdata
+            hovertemplate=f"Gene: %{{customdata}}<br>Log2FC: %{{x}}<br>-log10(Adj. P-value): %{{y}}<extra></extra>"
+        ))
 
     # Add threshold lines
     fig.add_hline(y=-np.log10(p_thresh), line_dash="dash", line_color="black", opacity=0.5)
@@ -45,6 +57,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thr
         yaxis_title="-log10(Adjusted P-value)",
         hovermode='closest',
         dragmode='lasso', # Default to Lasso for pathway selection
+        clickmode='event+select',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=40, r=40, t=80, b=40)
     )
@@ -78,20 +91,36 @@ def create_pathway_bar_chart(enrichment_df):
     )
 
     return fig
-import numpy as np
-from plotly.graph_objects import Heatmap
-from scipy import stats
 
 def create_heatmap(df):
     """
     Displays a Z-score normalized heatmap of the input data.
     """
-    z_scores = stats.zscore(df, axis=1)
-    fig = Heatmap(
-        z=z_scores,
-        colorscale='RdBu_r',
-        reversescale=False,
-        showscale=False
-    )
-    fig.update_layout(autosize=True)
-    return fig
+    if df.empty:
+        return go.Figure().update_layout(title="No data to display")
+    
+    try:
+        numeric_df = df.select_dtypes(include=np.number)
+        z_scores = stats.zscore(numeric_df, axis=1, nan_policy='omit')
+        
+        fig = go.Figure(data=go.Heatmap(
+            z=z_scores,
+            colorscale='RdBu_r',
+            reversescale=True,
+            showscale=True,
+            colorbar=dict(title='Z-score')
+        ))
+        
+        fig.update_layout(
+            title='Z-score Normalized Heatmap',
+            xaxis_title='Samples',
+            yaxis_title='Genes',
+            template='simple_white',
+            margin=dict(l=40, r=40, t=80, b=40)
+        )
+        
+        return fig
+    
+    except Exception as e:
+        print(f"Error creating heatmap: {e}")
+        return go.Figure().update_layout(title="Error creating heatmap")

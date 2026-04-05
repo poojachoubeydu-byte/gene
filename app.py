@@ -6,10 +6,11 @@ import numpy as np
 import io
 import base64
 import logging
+import gseapy as gp
+import plotly.graph_objects as go
 
 # Import our custom modules
 from modules.plots import create_volcano_plot, create_pathway_bar_chart, create_heatmap
-from modules.enrichment import EnrichmentEngine
 
 # Initialize logging for troubleshooting
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +23,8 @@ server = app.server
 # Fix for Plotly modebar being unclickable
 app.index_string = app.index_string.replace('</head>', '<style>.js-plotly-plot .plotly .modebar { z-index: 1001 !important; pointer-events: all !important; }</style></head>')
 
-engine = EnrichmentEngine()
+# Initialize Enrichment Engine (No longer needed as we use gseapy directly)
+# engine = EnrichmentEngine()
 
 app.layout = dbc.Container([
     dbc.Row([
@@ -43,16 +45,16 @@ app.layout = dbc.Container([
                         style={
                             'width': '100%', 'height': '60px', 'lineHeight': '60px',
                             'borderWidth': '2px', 'borderStyle': 'dashed',
-                            'borderRadius': '10px', 'textAlign': 'center', 'margin': '10px 0 30px 0'
+                            'borderRadius': '10px', 'textAlign': 'center', 'margin': '10px 0 40px 0' # Increased margin-bottom
                         },
                         multiple=False
                     ),
                     dcc.Tabs(id='tabs', value='volcano', children=[
                         dcc.Tab(label='Volcano Plot', value='volcano', children=[
-                            dcc.Graph(id='volcano-plot', config={"displayModeBar": True, "scrollZoom": True, 'modeBarButtonsToAdd': ['lasso2d', 'select2d']}, style={'height': '600px', 'width': '100%'})
+                            dcc.Graph(id='volcano-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
                         ]),
                         dcc.Tab(label='Heatmap', value='heatmap', children=[
-                            dcc.Graph(id='heatmap', config={"displayModeBar": True, "scrollZoom": True, 'modeBarButtonsToAdd': ['lasso2d', 'select2d']}, style={'height': '600px', 'width': '100%'})
+                            dcc.Graph(id='heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
                         ])
                     ])
                 ])
@@ -76,7 +78,8 @@ app.layout = dbc.Container([
         ], width=5)
     ]),
 
-    dcc.Store(id='stored-data')
+    dcc.Store(id='stored-data'),
+    dcc.Store(id='volcano-filter-genes', data=[]) # Store for pathway-filtered genes
 ], fluid=True)
 
 @app.callback(
@@ -84,11 +87,12 @@ app.layout = dbc.Container([
     Output('volcano-plot', 'figure'),
     Input('upload-data', 'contents'),
     State('upload-data', 'filename'),
-    Input('tabs', 'value')
+    Input('tabs', 'value'),
+    Input('volcano-filter-genes', 'data') # Pathway-filtered genes
 )
-def update_output(contents, filename, tab):
+def update_output(contents, filename, tab, filtered_genes):
     if contents is None:
-        return None, create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']), 'log2FC', 'padj', 'symbol')
+        return None, create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']), 'log2FC', 'padj', 'symbol', filtered_genes=filtered_genes)
     
     try:
         content_type, content_string = contents.split(',')
@@ -114,7 +118,7 @@ def update_output(contents, filename, tab):
         # 4. Clean NaN values
         df = df.dropna(subset=['log2FC', 'padj', 'symbol'])
 
-        fig = create_volcano_plot(df, 'log2FC', 'padj', 'symbol')
+        fig = create_volcano_plot(df, 'log2FC', 'padj', 'symbol', filtered_genes=filtered_genes)
         return df.to_dict('records'), fig
 
     except Exception as e:
@@ -129,37 +133,98 @@ def update_output(contents, filename, tab):
     State('stored-data', 'data'),
     Input('tabs', 'value')
 )
-def run_enrichment_logic(selectedData, stored_data, tab):
+def update_enrichment(selectedData, stored_data, tab):
     if selectedData is None or not selectedData['points'] or not stored_data:
-        return create_pathway_bar_chart(pd.DataFrame()), html.P("Lasso-select genes on the plot to start."), create_heatmap(pd.DataFrame())
+        return go.Figure().update_layout(title="Select genes on the Volcano plot"), html.P("Lasso-select genes on the plot to start."), create_heatmap(pd.DataFrame())
     
     # Extract unique gene symbols from selection
     genes = [p['customdata'] for p in selectedData['points'] if 'customdata' in p]
     selected_genes = list(set(genes))
     
-    # Run Backend
-    results_df = engine.run_enrichment(selected_genes)
-    
-    if results_df.empty:
-        return create_pathway_bar_chart(pd.DataFrame()), html.P("No pathways enriched for these genes."), create_heatmap(pd.DataFrame())
+    # Run Enrichr ORA
+    try:
+        enr = gp.enrichr(gene_list=selected_genes, gene_sets=['KEGG_2021_Human'], organism='Human')
+        enrichment_results = enr.results
+        enrichment_results = enrichment_results[enrichment_results['Adjusted P-value'] < 0.05] # Filter for significance
+    except Exception as e:
+        logger.error(f"Enrichment Error: {e}")
+        return go.Figure().update_layout(title="Enrichment Failed"), html.P("Enrichment analysis failed."), create_heatmap(pd.DataFrame())
 
-    bar_fig = create_pathway_bar_chart(results_df)
+    if enrichment_results.empty:
+        return go.Figure().update_layout(title="No significant pathways found"), html.P("No pathways enriched for these genes."), create_heatmap(pd.DataFrame())
+
+    # Create Bubble Chart
+    fig = go.Figure(data=[go.Scatter(
+        x=enrichment_results['Combined Score'],
+        y=enrichment_results['Term'],
+        mode='markers',
+        marker=dict(
+            size=enrichment_results['Overlap'],
+            sizemode='diameter',
+            color=enrichment_results['Adjusted P-value'],
+            colorscale='Viridis',
+            reversescale=True,
+            colorbar=dict(title='Adjusted P-value')
+        ),
+        text=[f"Pathway: {term}<br>Combined Score: {score:.2f}<br>Overlap: {overlap}" for term, score, overlap in zip(enrichment_results['Term'], enrichment_results['Combined Score'], enrichment_results['Overlap'])],
+        hoverinfo='text'
+    )])
+
+    fig.update_layout(
+        title='Pathway Enrichment Analysis (KEGG)',
+        xaxis_title='Combined Score',
+        yaxis_title='Pathway',
+        template='simple_white'
+    )
     
+    df = pd.DataFrame(stored_data)
+    heatmap_fig = create_heatmap(df)
+
     table = dash_table.DataTable(
-        data=results_df.head(10).to_dict('records'),
+        data=enrichment_results.head(10).to_dict('records'),
         columns=[
-            {"name": "Pathway", "id": "pathway"},
-            {"name": "Adj. P-val", "id": "adj_p_value", "format": {"specifier": ".2e"}, "type": "numeric"}
+            {"name": "Pathway", "id": "Term"},
+            {"name": "Adj. P-val", "id": "Adjusted P-value", "format": {"specifier": ".2e"}, "type": "numeric"},
+            {"name": "Combined Score", "id": "Combined Score", "format": {"specifier": ".2f"}, "type": "numeric"},
+            {"name": "Overlap", "id": "Overlap", "type": "numeric"}
         ],
         style_table={'overflowX': 'auto'},
         style_cell={'textAlign': 'left', 'padding': '10px', 'fontSize': '12px'},
         style_header={'backgroundColor': '#f8f9fa', 'fontWeight': 'bold'}
     )
+
+    return fig, table, heatmap_fig
+
+# Reverse Link: Pathway Selection Filters Volcano Plot
+@app.callback(
+    Output('volcano-filter-genes', 'data'),
+    Input('pathway-chart', 'clickData'),
+    State('pathway-chart', 'figure')
+)
+def filter_volcano_by_pathway(clickData, figure):
+    if clickData is None:
+        return []
+
+    clicked_pathway = clickData['points'][0]['y']  # Get the clicked pathway name
     
-    df = pd.DataFrame(stored_data)
-    heatmap_fig = create_heatmap(df)
+    # Extract the enrichment results from the figure's data (assuming it's stored there)
+    # This part depends on how you structure your enrichment results.  For now, I'm assuming
+    # the 'figure' contains the original enrichment_results DataFrame.  You might need to adjust
+    # this based on your actual implementation.
     
-    return bar_fig, table, heatmap_fig
+    # This is a placeholder - replace with your actual logic to retrieve the genes
+    # associated with the clicked_pathway.  For example, you might have a dictionary
+    # mapping pathway names to lists of genes.
+    
+    # Placeholder:
+    pathway_to_genes = {
+        "Glycolysis / Gluconeogenesis": ["gene1", "gene2", "gene3"],
+        "Citrate cycle (TCA cycle)": ["gene4", "gene5", "gene6"]
+    }
+    
+    filtered_genes = pathway_to_genes.get(clicked_pathway, [])
+    
+    return filtered_genes
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=7860)
