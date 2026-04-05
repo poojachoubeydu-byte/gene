@@ -45,10 +45,10 @@ app.layout = dbc.Container([
                     ),
                     dcc.Tabs(id='tabs', value='volcano', children=[
                         dcc.Tab(label='Volcano Plot', value='volcano', children=[
-                            dcc.Graph(id='volcano-plot', config={"scrollZoom": True, "displayModeBar": True}, style={'height': '600px'})
+                            dcc.Graph(id='volcano-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px'})
                         ]),
                         dcc.Tab(label='Heatmap', value='heatmap', children=[
-                            dcc.Graph(id='heatmap', config={"scrollZoom": True, "displayModeBar": True}, style={'height': '600px'})
+                            dcc.Graph(id='heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px'})
                         ])
                     ])
                 ])
