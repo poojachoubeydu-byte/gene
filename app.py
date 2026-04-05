@@ -53,15 +53,19 @@ app.layout = dbc.Container([
     dbc.Row([dbc.Col([
         html.Div([
             html.H2("🧬 Real-Time RNA-Seq Pathway Visualizer",
-                    style={'color': 'white', 'marginBottom': '4px', 'fontSize': '22px'}),
-            html.P("Interactive Differential Expression \u2194 Pathway Analysis  |  "
-                   "Powered by GSEApy \u00b7 Plotly Dash",
-                   style={'color': 'rgba(255,255,255,0.82)', 'marginBottom': 0, 'fontSize': '12px'})
+                    style={'color':'white','marginBottom':'4px',
+                           'fontSize':'20px','fontWeight':'700'}),
+            html.P("Interactive Differential Expression ↔ Pathway Analysis  |"
+                   "  GSEApy · Plotly Dash · KEGG · Reactome",
+                   style={'color':'rgba(255,255,255,0.82)',
+                          'marginBottom':0,'fontSize':'11px'})
         ], style={
-            'background': 'linear-gradient(90deg,#1a237e,#1565c0)',
-            'padding': '18px 28px', 'borderRadius': '8px', 'marginBottom': '16px'
+            'background':'linear-gradient(90deg,#1a237e,#1565c0)',
+            'padding':'16px 24px',
+            'borderRadius':'8px',
+            'marginBottom':'12px'
         })
-    ], width=12)]),
+    ], width=12)])
 
     # ── ALERT BANNER ────────────────────────────────────
     dbc.Row([dbc.Col([
@@ -147,23 +151,45 @@ app.layout = dbc.Container([
     # ── MAIN PANELS ─────────────────────────────────────
     dbc.Row([
 
-        # LEFT: Volcano + Heatmap tabs
+        # LEFT: Volcano + Heatmap (vertical stack)
         dbc.Col([
             dbc.Card([dbc.CardBody([
-                dcc.Tabs(id='main-tabs', value='volcano', children=[
+                html.Div([
+                    html.Div([
+                        html.Span("🌋 Volcano Plot",
+                                  style={'fontWeight':'600','fontSize':'13px',
+                                         'color':'#1a237e','marginBottom':'4px',
+                                         'display':'block'}),
+                        html.Small("Use lasso tool to select genes → triggers pathway enrichment",
+                                   style={'color':'#888','fontSize':'11px'}),
+                    ], style={'marginBottom':'6px'}),
 
-                    dcc.Tab(label='\U0001f30b Volcano Plot', value='volcano', children=[
-                        dcc.Graph(id='volcano-graph-obj',
-                                  config={'displayModeBar': True, 'scrollZoom': True,
-                                          'modeBarButtonsToAdd': ['lasso2d', 'select2d']},
-                                  style={'height': '580px', 'width': '100%'})
-                    ]),
+                    dcc.Graph(
+                        id='volcano-graph-obj',
+                        config={
+                            'displayModeBar': True,
+                            'scrollZoom': True,
+                            'modeBarButtonsToAdd': ['lasso2d', 'select2d']
+                        },
+                        style={'height': '420px', 'width': '100%'}
+                    ),
 
-                    dcc.Tab(label='\U0001f7e5 Fold-Change Heatmap', value='heatmap', children=[
-                        dcc.Graph(id='gene-heatmap-obj',
-                                  config={'displayModeBar': True, 'scrollZoom': True},
-                                  style={'height': '580px', 'width': '100%'})
-                    ])
+                    html.Hr(style={'margin':'12px 0','borderColor':'#e9ecef'}),
+
+                    html.Div([
+                        html.Span("🟥 Fold-Change Heatmap",
+                                  style={'fontWeight':'600','fontSize':'13px',
+                                         'color':'#1a237e','marginBottom':'4px',
+                                         'display':'block'}),
+                        html.Small("Log2 fold-change of selected genes — red=up, blue=down",
+                                   style={'color':'#888','fontSize':'11px'}),
+                    ], style={'marginBottom':'6px'}),
+
+                    dcc.Graph(
+                        id='gene-heatmap-obj',
+                        config={'displayModeBar': True},
+                        style={'height': '320px', 'width': '100%'}
+                    ),
                 ])
             ])], className="shadow-sm")
         ], width=7),
@@ -177,14 +203,18 @@ app.layout = dbc.Container([
                                style={'color': '#6c757d', 'fontSize': '11px'})
                 ])),
                 dbc.CardBody([
-                    dbc.Spinner(
-                        html.Div([
-                            dcc.Graph(id='pathway-bubble-obj',
-                                      config={'displayModeBar': True},
-                                      style={'height': '420px'}),
-                            html.Div(id='enrichment-table-container', className="mt-2")
-                        ]),
-                        color="primary", type="border"
+                    dcc.Loading(
+                        type='circle',
+                        color='#1565c0',
+                        children=[
+                            dcc.Graph(
+                                id='pathway-bubble-obj',
+                                config={"displayModeBar": True},
+                                style={'height': '400px'}
+                            ),
+                            html.Div(id='enrichment-table-container',
+                                     className="mt-2")
+                        ]
                     )
                 ])
             ], className="shadow-sm")
@@ -357,13 +387,12 @@ def run_enrichment_on_selection(selectedData, stored_data):
     State('gsea-results-store', 'data'),
     prevent_initial_call=True
 )
-def highlight_pathway_genes(clickData, gene_index_dict):
+def filter_volcano_by_pathway(clickData, gene_index_dict):
     if not clickData or not gene_index_dict:
         return []
     try:
-        clicked_term = clickData['points'][0]['customdata']
-        genes = gene_index_dict.get(clicked_term, [])
-        return genes
+        clicked_term = clickData['points'][0]['y']
+        return gene_index_dict.get(clicked_term, [])
     except Exception:
         return []
 

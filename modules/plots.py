@@ -271,13 +271,17 @@ def create_heatmap(df, selected_genes):
 
     fig = go.Figure(data=go.Heatmap(
         z=z,
-        y=y_labels,
-        x=['Log2 Fold Change'],
-        colorscale='RdBu',
+        y=filtered['symbol'].tolist(),
+        x=[''],
+        colorscale='RdBu_r',
         zmid=0,
         zmin=-lfc_abs_max,
         zmax=lfc_abs_max,
-        colorbar=dict(title='Log2FC', thickness=14),
+        colorbar=dict(
+            title=dict(text='Log2FC', side='right'),
+            thickness=16,
+            len=0.8
+        ),
         customdata=customdata,
         hovertemplate=(
             "<b>%{customdata[0]}</b><br>"
@@ -288,12 +292,14 @@ def create_heatmap(df, selected_genes):
     ))
 
     fig.update_layout(
-        title=dict(text='Fold-Change Profile of Selected Genes',
-                   font=dict(size=13)),
+        title=dict(
+            text='Fold-Change Profile of Selected Genes',
+            font=dict(size=12)
+        ),
         template='simple_white',
-        margin=dict(l=120, r=30, t=60, b=40),
-        yaxis=dict(tickfont=dict(size=10)),
-        xaxis=dict(tickfont=dict(size=11))
+        margin=dict(l=150, r=20, t=50, b=30),
+        yaxis=dict(tickfont=dict(size=10), automargin=True),
+        xaxis=dict(showticklabels=False)
     )
 
     return fig
