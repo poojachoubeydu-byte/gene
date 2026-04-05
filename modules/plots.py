@@ -93,4 +93,5 @@ def create_heatmap(df):
         reversescale=False,
         showscale=False
     )
+    fig.update_layout(autosize=True)
     return fig

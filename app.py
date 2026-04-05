@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # Initialize the Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 server = app.server
+
+# Fix for Plotly modebar being unclickable
+app.index_string = app.index_string.replace('</head>', '<style>.js-plotly-plot .plotly .modebar { z-index: 1001 !important; pointer-events: all !important; }</style></head>')
+
 engine = EnrichmentEngine()
 
 app.layout = dbc.Container([
@@ -45,10 +49,10 @@ app.layout = dbc.Container([
                     ),
                     dcc.Tabs(id='tabs', value='volcano', children=[
                         dcc.Tab(label='Volcano Plot', value='volcano', children=[
-                            dcc.Graph(id='volcano-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px'})
+                            dcc.Graph(id='volcano-plot', config={"displayModeBar": True, "scrollZoom": True, 'modeBarButtonsToAdd': ['lasso2d', 'select2d']}, style={'height': '600px', 'width': '100%'})
                         ]),
                         dcc.Tab(label='Heatmap', value='heatmap', children=[
-                            dcc.Graph(id='heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px'})
+                            dcc.Graph(id='heatmap', config={"displayModeBar": True, "scrollZoom": True, 'modeBarButtonsToAdd': ['lasso2d', 'select2d']}, style={'height': '600px', 'width': '100%'})
                         ])
                     ])
                 ])
