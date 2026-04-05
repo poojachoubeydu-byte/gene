@@ -130,7 +130,7 @@ def run_enrichment_logic(selectedData, stored_data, tab):
         return create_pathway_bar_chart(pd.DataFrame()), html.P("Lasso-select genes on the plot to start."), create_heatmap(pd.DataFrame())
     
     # Extract unique gene symbols from selection
-    selected_genes = list(set([point['customdata'] for point in selectedData['points']]))
+    selected_genes = list(set([p['customdata'] for p in selectedData['points'] if 'customdata' in p]))
     
     # Run Backend
     results_df = engine.run_enrichment(selected_genes)
