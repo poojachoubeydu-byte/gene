@@ -99,7 +99,7 @@ app.layout = dbc.Container([
                         max_size=50 * 1024 * 1024,
                         multiple=False
                     )
-                ]),
+                ], style={'flexShrink': '1', 'minWidth': '120px'}),
 
                 # Demo button
                 html.Div([
@@ -107,7 +107,7 @@ app.layout = dbc.Container([
                     dbc.Button("\u25b6 Load Demo (PBMC LPS vs Control)",
                                id='load-demo-btn', color="outline-primary",
                                size="sm", style={'height': '44px', 'fontSize': '12px'})
-                ]),
+                ], style={'flexShrink': '1', 'minWidth': '120px'}),
 
                 # Log2FC threshold
                 html.Div([
@@ -117,7 +117,7 @@ app.layout = dbc.Container([
                                value=1.0, marks={0.5: '0.5', 1.0: '1.0', 1.5: '1.5',
                                                  2.0: '2.0', 3.0: '3.0'},
                                tooltip={'placement': 'bottom', 'always_visible': False}),
-                ], style={'width': '220px'}),
+                ], style={'width': '220px', 'flexShrink': '1', 'minWidth': '120px'}),
 
                 # padj threshold
                 html.Div([
@@ -128,7 +128,7 @@ app.layout = dbc.Container([
                                           for v in [0.001, 0.01, 0.05, 0.1]],
                                  value=0.05, clearable=False,
                                  style={'width': '140px', 'fontSize': '12px'})
-                ]),
+                ], style={'flexShrink': '1', 'minWidth': '120px'}),
 
                 # Reset button
                 html.Div([
@@ -136,9 +136,9 @@ app.layout = dbc.Container([
                     dbc.Button("\u21ba Reset Selection", id='reset-btn',
                                color="outline-secondary", size="sm",
                                style={'height': '44px', 'fontSize': '12px'})
-                ]),
+                ], style={'flexShrink': '1', 'minWidth': '120px'}),
 
-            ], style={'display': 'flex', 'gap': '20px', 'alignItems': 'flex-end', 'flexWrap': 'wrap'})
+            ], style={'display': 'flex', 'gap': '16px', 'alignItems': 'flex-end', 'flexWrap': 'wrap', 'width': '100%'})
         ])], className="shadow-sm mb-3")
     ], width=12)]),
 
@@ -175,9 +175,17 @@ app.layout = dbc.Container([
                         config={
                             'displayModeBar': True,
                             'scrollZoom': True,
-                            'modeBarButtonsToAdd': ['lasso2d', 'select2d']
+                            'responsive': True,
+                            'modeBarButtonsToAdd': ['lasso2d', 'select2d'],
+                            'toImageButtonOptions': {
+                                'format': 'png',
+                                'filename': 'volcano_plot',
+                                'height': 600,
+                                'width': 900,
+                                'scale': 2
+                            }
                         },
-                        style={'height': '420px', 'width': '100%', 'minWidth': '520px'}
+                        style={'height': '420px', 'width': '100%'}
                     ),
 
                     html.Hr(style={'margin':'12px 0','borderColor':'#e9ecef'}),
@@ -193,18 +201,12 @@ app.layout = dbc.Container([
 
                     dcc.Graph(
                         id='gene-heatmap-obj',
-                        config={'displayModeBar': True},
-                        style={'height': '320px', 'width': '100%', 'minWidth': '520px'}
+                        config={'displayModeBar': True, 'responsive': True},
+                        style={'height': '340px', 'width': '100%'}
                     ),
-                ], style={
-                    'overflowX': 'auto',
-                    'overflowY': 'auto',
-                    'maxHeight': '820px',
-                    'minWidth': '0',
-                    'paddingBottom': '8px'
-                })
+                ])
             ])], className="shadow-sm")
-        ], width=7),
+        ], xs=12, sm=12, md=12, lg=7, xl=7),
 
         # RIGHT: Pathway enrichment
         dbc.Col([
@@ -215,30 +217,22 @@ app.layout = dbc.Container([
                                style={'color': '#6c757d', 'fontSize': '11px'})
                 ])),
                 dbc.CardBody([
-                    html.Div([
-                        dcc.Loading(
-                            type='circle',
-                            color='#1565c0',
-                            children=[
-                                dcc.Graph(
-                                    id='pathway-bubble-obj',
-                                    config={"displayModeBar": True},
-                                    style={'height': '400px', 'minWidth': '480px'}
-                                ),
-                                html.Div(id='enrichment-table-container',
-                                         className="mt-2")
-                            ]
-                        )
-                    ], style={
-                        'overflowX': 'auto',
-                        'overflowY': 'auto',
-                        'maxHeight': '820px',
-                        'minWidth': '0',
-                        'paddingBottom': '8px'
-                    })
+                    dcc.Loading(
+                        type='circle',
+                        color='#1565c0',
+                        children=[
+                            dcc.Graph(
+                                id='pathway-bubble-obj',
+                                config={"displayModeBar": True, "responsive": True},
+                                style={'height': '430px', 'width': '100%'}
+                            ),
+                            html.Div(id='enrichment-table-container',
+                                     className="mt-2")
+                        ]
+                    )
                 ])
             ], className="shadow-sm")
-        ], width=5)
+        ], xs=12, sm=12, md=12, lg=5, xl=5)
     ], className="mb-3"),
 
     # ── ANALYSIS SUMMARY ────────────────────────────────
@@ -255,7 +249,7 @@ app.layout = dbc.Container([
     dcc.Store(id='gsea-results-store', data={}),
     dcc.Store(id='volcano-filter-genes', data=[]),
 
-], fluid=True, style={'overflowX': 'auto', 'minWidth': '900px'})
+], fluid=True)
 
 # ── CALLBACK 1: Load data (upload OR demo button) ────────────────────────────
 
