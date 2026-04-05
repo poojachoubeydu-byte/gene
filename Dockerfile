@@ -16,4 +16,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 7860
 
 # Start the app using gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:7860", "app:server"]
+CMD ["gunicorn", "--workers", "2", "--timeout", "120", "--bind", "0.0.0.0:7860", "app:server"]
