@@ -114,7 +114,6 @@ def create_pathway_enrichment(selected_genes):
         enr = gp.enrichr(
             gene_list=selected_genes,
             gene_sets=['KEGG_2021_Human', 'Reactome_2022'],
-            organism='Human',
             outdir=None,
             cutoff=0.05
         )
