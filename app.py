@@ -42,12 +42,18 @@ app.index_string = app.index_string.replace(
     '<style>'
     '.js-plotly-plot .plotly .modebar{z-index:1001!important;pointer-events:all!important;}'
     '.upload-zone:hover{background:#f0f7ff!important;}'
+    '::-webkit-scrollbar {width: 6px;height: 6px;}'
+    '::-webkit-scrollbar-track {background: #f1f1f1;border-radius: 3px;}'
+    '::-webkit-scrollbar-thumb {background: #b0bec5;border-radius: 3px;}'
+    '::-webkit-scrollbar-thumb:hover {background: #78909c;}'
     '</style></head>'
 )
 
 # ── LAYOUT ───────────────────────────────────────────────────────────────────
 
 app.layout = dbc.Container([
+
+
 
     # ── HEADER ──────────────────────────────────────────
     dbc.Row([dbc.Col([
@@ -171,7 +177,7 @@ app.layout = dbc.Container([
                             'scrollZoom': True,
                             'modeBarButtonsToAdd': ['lasso2d', 'select2d']
                         },
-                        style={'height': '420px', 'width': '100%'}
+                        style={'height': '420px', 'width': '100%', 'minWidth': '520px'}
                     ),
 
                     html.Hr(style={'margin':'12px 0','borderColor':'#e9ecef'}),
@@ -188,9 +194,15 @@ app.layout = dbc.Container([
                     dcc.Graph(
                         id='gene-heatmap-obj',
                         config={'displayModeBar': True},
-                        style={'height': '320px', 'width': '100%'}
+                        style={'height': '320px', 'width': '100%', 'minWidth': '520px'}
                     ),
-                ])
+                ], style={
+                    'overflowX': 'auto',
+                    'overflowY': 'auto',
+                    'maxHeight': '820px',
+                    'minWidth': '0',
+                    'paddingBottom': '8px'
+                })
             ])], className="shadow-sm")
         ], width=7),
 
@@ -203,19 +215,27 @@ app.layout = dbc.Container([
                                style={'color': '#6c757d', 'fontSize': '11px'})
                 ])),
                 dbc.CardBody([
-                    dcc.Loading(
-                        type='circle',
-                        color='#1565c0',
-                        children=[
-                            dcc.Graph(
-                                id='pathway-bubble-obj',
-                                config={"displayModeBar": True},
-                                style={'height': '400px'}
-                            ),
-                            html.Div(id='enrichment-table-container',
-                                     className="mt-2")
-                        ]
-                    )
+                    html.Div([
+                        dcc.Loading(
+                            type='circle',
+                            color='#1565c0',
+                            children=[
+                                dcc.Graph(
+                                    id='pathway-bubble-obj',
+                                    config={"displayModeBar": True},
+                                    style={'height': '400px', 'minWidth': '480px'}
+                                ),
+                                html.Div(id='enrichment-table-container',
+                                         className="mt-2")
+                            ]
+                        )
+                    ], style={
+                        'overflowX': 'auto',
+                        'overflowY': 'auto',
+                        'maxHeight': '820px',
+                        'minWidth': '0',
+                        'paddingBottom': '8px'
+                    })
                 ])
             ], className="shadow-sm")
         ], width=5)
@@ -235,7 +255,7 @@ app.layout = dbc.Container([
     dcc.Store(id='gsea-results-store', data={}),
     dcc.Store(id='volcano-filter-genes', data=[]),
 
-], fluid=True)
+], fluid=True, style={'overflowX': 'auto', 'minWidth': '900px'})
 
 # ── CALLBACK 1: Load data (upload OR demo button) ────────────────────────────
 

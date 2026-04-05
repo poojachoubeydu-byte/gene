@@ -51,10 +51,18 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 "<extra></extra>"
             ),
             selected=dict(
-                marker=dict(opacity=1.0, size=8)
+                marker=dict(
+                    opacity=1.0,
+                    size=9,
+                    color=color
+                )
             ),
             unselected=dict(
-                marker=dict(opacity=0.25, size=5, color=color)
+                marker=dict(
+                    opacity=0.2,
+                    size=5,
+                    color=color
+                )
             )
         ))
 
@@ -177,7 +185,9 @@ def create_pathway_enrichment(selected_genes):
         xaxis_label = 'Combined Score'
 
     # ── Truncate long pathway names ──────────────────────
-    results['Term_display'] = results['Term'].str[:55]
+    results['Term_display'] = results['Term'].apply(
+        lambda x: x[:50] + '…' if len(str(x)) > 50 else str(x)
+    )
 
     # ── Build gene index dict ────────────────────────────
     gene_index_dict = {}
@@ -199,7 +209,13 @@ def create_pathway_enrichment(selected_genes):
             colorscale='RdYlBu',
             reversescale=True,
             showscale=True,
-            colorbar=dict(title='-log10<br>(Adj.P)', thickness=12)
+            colorbar=dict(
+                title=dict(text='-log10<br>Adj.P', side='right'),
+                thickness=14,
+                len=0.75,
+                x=1.02,
+                xanchor='left'
+            )
         ),
         customdata=results['Term'].values,
         hovertemplate=(
@@ -218,12 +234,17 @@ def create_pathway_enrichment(selected_genes):
         xaxis_title=xaxis_label,
         yaxis_title='',
         template='simple_white',
-        margin=dict(l=300, r=20, t=50, b=40),
-        height=480,
+        margin=dict(l=320, r=80, t=50, b=50),
+        height=520,
+        xaxis=dict(
+            title=dict(
+                text='Normalised Combined Score (0–100)',
+                font=dict(size=11)
+            )
+        ),
         yaxis=dict(
             tickfont=dict(size=9),
-            automargin=True,
-            tickmode='array'
+            automargin=True
         )
     )
 
@@ -300,7 +321,7 @@ def create_heatmap(df, selected_genes):
 
     fig = go.Figure(data=go.Heatmap(
         z=z,
-        y=filtered['symbol'].tolist(),
+        y=filtered['symbol'].str.strip().tolist(),
         x=[''],
         colorscale='RdBu_r',
         zmid=0,
@@ -320,15 +341,30 @@ def create_heatmap(df, selected_genes):
         )
     ))
 
+    n_genes = len(filtered)
     fig.update_layout(
         title=dict(
-            text='Fold-Change Profile of Selected Genes',
+            text=f'Fold-Change Profile — {n_genes} Selected Genes',
             font=dict(size=12)
         ),
         template='simple_white',
-        margin=dict(l=160, r=30, t=50, b=30),
-        yaxis=dict(tickfont=dict(size=10), automargin=True),
+        margin=dict(l=180, r=40, t=50, b=30),
+        yaxis=dict(
+            tickfont=dict(size=10),
+            automargin=True,
+            ticklabelposition='outside left'
+        ),
         xaxis=dict(showticklabels=False)
+    )
+
+    fig.add_annotation(
+        text="Red = upregulated  |  Blue = downregulated  "
+             "|  Sorted by Log2FC",
+        xref='paper', yref='paper',
+        x=0.5, y=-0.08,
+        showarrow=False,
+        font=dict(size=9, color='#666666'),
+        xanchor='center'
     )
 
     return fig
