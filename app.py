@@ -51,7 +51,7 @@ app.layout = dbc.Container([
                             dcc.Graph(id='volcano-plot', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
                         ]),
                         dcc.Tab(label='Heatmap', value='heatmap', children=[
-                            dcc.Graph(id='heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
+                            dcc.Graph(id='gene-heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '600px', 'width': '100%'})
                         ])
                     ])
                 ])
@@ -72,7 +72,7 @@ app.layout = dbc.Container([
                     ),
                     dbc.Spinner(
                         children=[
-                            dcc.Graph(id='heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'})
+                            dcc.Graph(id='gene-heatmap', config={"displayModeBar": True, "scrollZoom": True}, style={'height': '400px'})
                         ],
                         type="border",
                         color="primary"
@@ -131,7 +131,7 @@ def update_output(contents, filename, tab, filtered_genes):
 
 @app.callback(
     Output('pathway-chart', 'figure'),
-    Output('heatmap', 'figure'),
+    Output('gene-heatmap', 'figure'),
     Output('enrichment-table-container', 'children'),
     Input('volcano-plot', 'selectedData'),
     State('stored-data', 'data')
