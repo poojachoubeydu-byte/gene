@@ -100,23 +100,26 @@ def validate_deg_data(df):
     errors = []
     warnings = []
 
-    # Check for required columns
+    # Check for required columns (case-insensitive matching)
+    col_lower_map = {c.lower(): c for c in df.columns}
     missing_cols = []
     for col in REQUIRED_COLUMNS:
         if col not in df.columns:
-            # Try common alternatives
+            # Try common alternatives (case-insensitive)
             alternatives = {
-                'gene_symbol': ['symbol', 'gene', 'gene_symbol', 'id', 'name', 'gene_name'],
-                'log2_fold_change': ['log2FC', 'logfc', 'lfc', 'log2_fold_change', 'fold_change'],
-                'adjusted_p_value': ['padj', 'fdr', 'qvalue', 'adj_p', 'adjusted_p_value']
+                'gene_symbol': ['symbol', 'gene', 'gene_symbol', 'id', 'name', 'gene_name', 'genename', 'gene_id'],
+                'log2_fold_change': ['log2foldchange', 'log2fc', 'logfc', 'lfc', 'log2_fold_change', 'fold_change', 'foldchange', 'log2_fc'],
+                'adjusted_p_value': ['padj', 'fdr', 'qvalue', 'adj_p', 'adjusted_p_value', 'adj.p.val', 'adj_pval', 'p_adj', 'p.adj']
             }
             found_alt = None
             for alt in alternatives.get(col, []):
-                if alt in df.columns:
-                    found_alt = alt
+                actual = col_lower_map.get(alt.lower())
+                if actual is not None:
+                    found_alt = actual
                     break
             if found_alt:
                 df = df.rename(columns={found_alt: col})
+                col_lower_map = {c.lower(): c for c in df.columns}
             else:
                 missing_cols.append(col)
 
