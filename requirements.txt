@@ -4,7 +4,7 @@ numpy
 plotly
 gseapy
 scanpy
-pydeseq2
 requests
 gunicorn
 dash_bootstrap_components
+scipy

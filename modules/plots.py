@@ -66,22 +66,49 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thr
 
     fig.update_layout(dragmode='lasso', clickmode='event+select')
 
+    # Annotate top 15 significant genes
+    significant_genes = d[d['status'] != 'Not Significant'].sort_values(by='minus_log10_p', ascending=False).head(15)
+
+    if len(significant_genes) > 0:
+        for _, row in significant_genes.iterrows():
+            fig.add_annotation(
+                x=row[logfc_col],
+                y=row['minus_log10_p'],
+                text=row[gene_col],
+                showarrow=False,
+                font=dict(size=9, color='black'),
+                xanchor='left',
+                yanchor='bottom'
+            )
+
     return fig
 
 def create_pathway_enrichment(selected_genes):
     """
-    Performs pathway enrichment analysis using gseapy and returns a Plotly bubble chart.
+    Performs pathway enrichment analysis using gseapy and returns a Plotly bubble chart and the enrichment results.
     """
     try:
         enr = gp.enrichr(gene_list=selected_genes, gene_sets=['KEGG_2021_Human'], organism='Human')
         enrichment_results = enr.results
-        enrichment_results = enrichment_results[enrichment_results['Adjusted P-value'] < 0.05] # Filter for significance
+        enrichment_results = enrichment_results[enrichment_results['Adjusted P-value'] < 0.05].copy() # Filter for significance and create a copy
+
+        if enrichment_results.empty:
+            return go.Figure().update_layout(title="No significant pathways found"), dash_table.DataTable(data=[], columns=[]), None
+
+        # Fix overlap string and calculate bubble size
+        enrichment_results['overlap_count'] = enrichment_results['Overlap'].str.split('/').str[0].astype(int)
+        min_o = enrichment_results['overlap_count'].min()
+        max_o = enrichment_results['overlap_count'].max()
+        enrichment_results['bubble_size'] = 8 + 32 * (enrichment_results['overlap_count'] - min_o) / max(max_o - min_o, 1)
+
+        # Sort by Combined Score and take top 20
+        enrichment_results = enrichment_results.sort_values(by='Combined Score', ascending=False).head(20)
+
+
     except Exception as e:
         print(f"Enrichment Error: {e}")
-        return go.Figure().update_layout(title="Enrichment Failed"), dash_table.DataTable(data=[], columns=[])
+        return go.Figure().update_layout(title="Enrichment Failed"), dash_table.DataTable(data=[], columns=[]), None
 
-    if enrichment_results.empty:
-        return go.Figure().update_layout(title="No significant pathways found"), dash_table.DataTable(data=[], columns=[])
 
     # Create Bubble Chart
     fig = go.Figure(data=[go.Scatter(
@@ -89,7 +116,7 @@ def create_pathway_enrichment(selected_genes):
         y=enrichment_results['Term'],
         mode='markers',
         marker=dict(
-            size=enrichment_results['Overlap'],
+            size=enrichment_results['bubble_size'],
             sizemode='diameter',
             color=enrichment_results['Adjusted P-value'],
             colorscale='Viridis',
@@ -120,51 +147,49 @@ def create_pathway_enrichment(selected_genes):
         style_header={'backgroundColor': '#f8f9fa', 'fontWeight': 'bold'}
     )
 
-    return fig, table
+    return fig, table, enrichment_results
 
 def create_heatmap(df, selected_genes):
     """
-    Displays a Z-score normalized heatmap of the selected genes.
+    Displays a DEG Signature Heatmap of the selected genes, showing Log2FC values.
+    Per-sample expression matrix is not available from a DEG summary table. 
+    Fold-change heatmap correctly represents the directionality and magnitude of differential expression for the selected gene set.
     """
     if df.empty or not selected_genes:
         return go.Figure().update_layout(title="No data or genes selected")
     
-    try:
-        # Filter the DataFrame for selected genes
-        filtered_df = df[df['symbol'].isin(selected_genes)]
-        
-        # Select only numeric columns for Z-score calculation
-        numeric_df = filtered_df.select_dtypes(include=np.number)
-        
-        # Calculate Z-scores for each gene (row)
-        z_scores = stats.zscore(numeric_df, axis=1, nan_policy='omit')
-        
-        # Create the heatmap
-        fig = go.Figure(data=go.Heatmap(
-            z=z_scores,
-            colorscale='RdBu_r',
-            reversescale=True,
-            showscale=True,
-            colorbar=dict(title='Z-score'),
-            
-            # Add gene symbols as row labels (optional)
-            yaxis=dict(
-                title='Genes',
-                tickvals=list(range(len(filtered_df))),
-                ticktext=filtered_df['symbol'].tolist()
-            )
-        ))
-        
-        fig.update_layout(
-            title='Z-score Normalized Heatmap of Selected Genes',
-            xaxis_title='Samples',
-            yaxis_title='Genes',
-            template='simple_white',
-            margin=dict(l=40, r=40, t=80, b=40)
-        )
-        
-        return fig
+    # Filter the DataFrame for selected genes
+    filtered_df = df[df['symbol'].isin(selected_genes)].copy()
     
-    except Exception as e:
-        print(f"Error creating heatmap: {e}")
-        return go.Figure().update_layout(title="Error creating heatmap")
+    if filtered_df.empty:
+        return go.Figure().update_layout(title="No selected genes found in the data")
+
+    # Sort by Log2FC descending
+    filtered_df = filtered_df.sort_values(by='log2FC', ascending=False)
+
+    # Create the heatmap data (Nx1 matrix of Log2FC values)
+    z = [[row['log2FC']] for _, row in filtered_df.iterrows()]
+    y = filtered_df['symbol'].tolist()
+    x = ['Log2 Fold Change']
+
+    # Create the heatmap
+    fig = go.Figure(data=go.Heatmap(
+        z=z,
+        y=y,
+        x=x,
+        colorscale='RdBu',
+        zmid=0,
+        colorbar=dict(title='Log2FC'),
+        hovertemplate="Gene: %{y}<br>Log2FC: %{z}<br>Adj.P: %{customdata}<extra></extra>",
+        customdata=filtered_df['padj']
+    ))
+    
+    fig.update_layout(
+        title='Fold-Change Profile of Selected Genes',
+        xaxis_title='',
+        yaxis_title='Gene',
+        template='simple_white',
+        margin=dict(l=100, r=20, t=80, b=100)
+    )
+    
+    return fig
