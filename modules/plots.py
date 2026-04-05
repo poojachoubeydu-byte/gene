@@ -64,6 +64,8 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thr
         margin=dict(l=40, r=40, t=80, b=40)
     )
 
+    fig.update_layout(dragmode='lasso', clickmode='event+select')
+
     return fig
 
 def create_pathway_enrichment(selected_genes):
