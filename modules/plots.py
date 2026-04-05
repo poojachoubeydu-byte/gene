@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 import gseapy as gp
-from dash_table import DataTable
+from dash import dash_table
 
 def create_volcano_plot(df, logfc_col, padj_col, gene_col, lfc_thresh=1.0, p_thresh=0.05, filtered_genes=None):
     """
@@ -76,10 +76,10 @@ def create_pathway_enrichment(selected_genes):
         enrichment_results = enrichment_results[enrichment_results['Adjusted P-value'] < 0.05] # Filter for significance
     except Exception as e:
         print(f"Enrichment Error: {e}")
-        return go.Figure().update_layout(title="Enrichment Failed"), DataTable(data=[], columns=[])
+        return go.Figure().update_layout(title="Enrichment Failed"), dash_table.DataTable(data=[], columns=[])
 
     if enrichment_results.empty:
-        return go.Figure().update_layout(title="No significant pathways found"), DataTable(data=[], columns=[])
+        return go.Figure().update_layout(title="No significant pathways found"), dash_table.DataTable(data=[], columns=[])
 
     # Create Bubble Chart
     fig = go.Figure(data=[go.Scatter(
@@ -105,7 +105,7 @@ def create_pathway_enrichment(selected_genes):
         template='simple_white'
     )
 
-    table = DataTable(
+    table = dash_table.DataTable(
         data=enrichment_results.head(10).to_dict('records'),
         columns=[
             {"name": "Pathway", "id": "Term"},
