@@ -321,6 +321,9 @@ MAIN = dbc.Col([
                     html.Small("Combined significance × effect size. Green ≥ 70.",
                                className="text-muted d-block mb-2"),
                     dcc.Loading(html.Div(id="meta-table"), type="dot"),
+                    dbc.Button("⬇ Download CSV", id="btn-meta-csv", color="secondary",
+                               outline=True, size="sm", className="mt-2"),
+                    dcc.Download(id="dl-meta-csv"),
                 ], width=7),
             ], className="mt-2 px-2"),
         ]),
@@ -356,7 +359,12 @@ MAIN = dbc.Col([
                 dbc.Col(dcc.Loading(
                     dcc.Graph(id="path-bar", style={"height": 400}), type="circle",
                 ), width=6),
-                dbc.Col(dcc.Loading(html.Div(id="path-table"), type="dot"), width=6),
+                dbc.Col([
+                    dcc.Loading(html.Div(id="path-table"), type="dot"),
+                    dbc.Button("⬇ Enrichment CSV", id="btn-enr-csv", color="secondary",
+                               outline=True, size="sm", className="mt-2"),
+                    dcc.Download(id="dl-enr-csv"),
+                ], width=6),
             ], className="px-2 mt-1"),
             dbc.Row([
                 dbc.Col(dcc.Loading(
@@ -442,6 +450,9 @@ MAIN = dbc.Col([
                         dcc.Graph(id="drug-donut", style={"height": 340}), type="circle",
                     ),
                     dcc.Loading(html.Div(id="drug-table"), type="dot"),
+                    dbc.Button("⬇ Drug Targets CSV", id="btn-drug-csv", color="secondary",
+                               outline=True, size="sm", className="mt-2"),
+                    dcc.Download(id="dl-drug-csv"),
                 ], width=4),
             ], className="mt-2 px-2"),
         ]),
@@ -458,6 +469,9 @@ MAIN = dbc.Col([
                     dcc.Loading(
                         dcc.Graph(id="bm-chart", style={"height": 480}), type="circle",
                     ),
+                    dbc.Button("⬇ Biomarker CSV", id="btn-bm-csv", color="secondary",
+                               outline=True, size="sm", className="mt-1"),
+                    dcc.Download(id="dl-bm-csv"),
                 ], width=7),
                 dbc.Col([
                     html.H6("Cancer Gene Annotations",
@@ -1061,6 +1075,65 @@ def cb_pdf(n, vol, pca_f, enr_recs, bm_recs, data_recs, lfc_t, p_t):
     except Exception as e:
         log.error(f"pdf: {e}")
         return dash.no_update
+
+
+# ── CSV Downloads ─────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("dl-meta-csv", "data"),
+    Input("btn-meta-csv", "n_clicks"),
+    State("store", "data"),
+    prevent_initial_call=True,
+)
+def dl_meta_csv(n, rec):
+    if not n:
+        return dash.no_update
+    df = compute_meta_score(_s2df(rec))
+    cols = [c for c in ["symbol", "log2FC", "padj", "baseMean", "meta_score"] if c in df.columns]
+    return dcc.send_data_frame(df[cols].to_csv, "meta_score.csv", index=False)
+
+
+@app.callback(
+    Output("dl-enr-csv", "data"),
+    Input("btn-enr-csv", "n_clicks"),
+    State("enr-store", "data"),
+    prevent_initial_call=True,
+)
+def dl_enr_csv(n, rec):
+    if not n or not rec:
+        return dash.no_update
+    return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "enrichment_results.csv", index=False)
+
+
+@app.callback(
+    Output("dl-drug-csv", "data"),
+    Input("btn-drug-csv", "n_clicks"),
+    State("store", "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh", "value"),
+    prevent_initial_call=True,
+)
+def dl_drug_csv(n, rec, lfc_t, p_t):
+    if not n:
+        return dash.no_update
+    df = _s2df(rec)
+    sig_genes = df.loc[
+        (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t), "symbol"
+    ].str.upper().tolist()
+    drug_df = get_drug_targets(sig_genes)
+    return dcc.send_data_frame(drug_df.to_csv, "drug_targets.csv", index=False)
+
+
+@app.callback(
+    Output("dl-bm-csv", "data"),
+    Input("btn-bm-csv", "n_clicks"),
+    State("bm-store", "data"),
+    prevent_initial_call=True,
+)
+def dl_bm_csv(n, rec):
+    if not n or not rec:
+        return dash.no_update
+    return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "biomarker_scores.csv", index=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -147,14 +147,19 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
     already = set(onco_up[gene_col].str.upper().tolist() + tsg_dn[gene_col].str.upper().tolist())
     drug_sig = drug_sig[~drug_sig[gene_col].str.upper().isin(already)]
     if not drug_sig.empty:
+        # customdata col-0 = gene name so lasso selection captures these genes
+        _drug_cd = np.column_stack([
+            drug_sig[gene_col].values,
+            np.zeros(len(drug_sig)),
+        ])
         fig.add_trace(go.Scatter(
             x=drug_sig[logfc_col], y=drug_sig["_nlp"],
             mode="markers",
             name="Drug target",
             marker=dict(symbol="circle-open", size=14, color="#27ae60",
                         line=dict(color="#27ae60", width=2)),
-            text=drug_sig[gene_col],
-            hovertemplate="<b>%{text}</b> — FDA drug target<extra></extra>",
+            customdata=_drug_cd,
+            hovertemplate="<b>%{customdata[0]}</b> — FDA drug target<extra></extra>",
         ))
 
     # ── Threshold lines ──────────────────────────────────────────────────────

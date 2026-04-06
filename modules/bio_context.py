@@ -15,6 +15,12 @@ import time
 from functools import lru_cache
 
 import requests
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 log = logging.getLogger(__name__)
 
@@ -52,10 +58,25 @@ def fetch_gene_info(gene_symbol: str) -> dict:
     return result
 
 
+@retry(
+    retry=retry_if_exception_type(
+        (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
+    ),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def _get(url: str, params: dict, timeout: int = 6) -> requests.Response:
+    """GET with exponential-backoff retry on timeout / connection errors."""
+    r = requests.get(url, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r
+
+
 def _fetch(sym: str) -> dict:
     try:
         # ── NCBI Entrez: gene ID ────────────────────────────────────────────
-        r = requests.get(
+        r = _get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
             params={
                 "db": "gene",
@@ -63,9 +84,7 @@ def _fetch(sym: str) -> dict:
                 "retmode": "json",
                 "retmax": 1,
             },
-            timeout=6,
         )
-        r.raise_for_status()
         ids = r.json().get("esearchresult", {}).get("idlist", [])
         if not ids:
             return {"error": f"Gene '{sym}' not found in NCBI."}
@@ -74,12 +93,10 @@ def _fetch(sym: str) -> dict:
         time.sleep(0.35)  # NCBI rate limit: ≤ 3 req/s without API key
 
         # ── NCBI Entrez: gene summary ────────────────────────────────────────
-        r2 = requests.get(
+        r2 = _get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
             params={"db": "gene", "id": gene_id, "retmode": "json"},
-            timeout=6,
         )
-        r2.raise_for_status()
         gene_rec = r2.json().get("result", {}).get(gene_id, {})
 
         ncbi = {
@@ -92,7 +109,7 @@ def _fetch(sym: str) -> dict:
         }
 
         # ── UniProt REST ─────────────────────────────────────────────────────
-        r3 = requests.get(
+        r3 = _get(
             "https://rest.uniprot.org/uniprotkb/search",
             params={
                 "query": f"gene:{sym} AND organism_id:9606 AND reviewed:true",
@@ -100,9 +117,7 @@ def _fetch(sym: str) -> dict:
                 "format": "json",
                 "size": 1,
             },
-            timeout=6,
         )
-        r3.raise_for_status()
         uni_results = r3.json().get("results", [])
 
         uni: dict = {
