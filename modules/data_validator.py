@@ -139,7 +139,7 @@ class DataValidator:
             
             self.errors.append(ValidationError(
                 'error', 'missing_columns',
-                f"Missing required columns: {', '.join(missing_required). Expected at least one column for each: gene symbol, log2 fold change, adjusted p-value.",
+                f"Missing required columns: {', '.join(missing_required)}. Expected at least one column for each: gene symbol, log2 fold change, adjusted p-value.",
                 suggestions
             ))
         
