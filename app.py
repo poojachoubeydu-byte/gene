@@ -26,7 +26,6 @@ plotly_config = {
 # Configure Plotly to not use external CDN and disable math rendering
 import plotly
 plotly.io.renderers.default = 'browser'
-plotly.offline.init_notebook_mode(connected=False)
 
 # Disable KaTeX math rendering to avoid external CDN calls
 plotly_config['staticPlot'] = True
