@@ -172,9 +172,7 @@ def set_security_headers(response):
     response.headers['Permissions-Policy'] = (
         'camera=(), microphone=(), geolocation=(), payment=(), '
         'accelerometer=(), gyroscope=(), magnetometer=(), '
-        'usb=(), bluetooth=(), ambient-light-sensor=(), '
-        'document-domain=(), layout-animations=(), legacy-image-formats=(), '
-        'oversized-images=(), vr=(), wake-lock=()'
+        'usb=(), bluetooth=()'
     )
     # Allow cross-origin storage so Edge Tracking Prevention doesn't block
     # the Dash session cookie when the app is embedded in an iframe.
