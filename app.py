@@ -50,6 +50,7 @@ from modules.export import generate_pdf_report, compute_data_integrity_score
 from modules.session_manager import get_session_manager
 from modules.advanced_export import get_exporter
 from modules.data_validator import DataValidator, validate_deg_data
+from modules.visualizer_pro import create_gsea_plot
 from modules.progress_tracker import get_progress_tracker, create_upload_progress_tracker
 from modules.batch_analysis import get_batch_analyzer
 
@@ -503,133 +504,256 @@ app.layout = dbc.Container([
         ], id='batch-mode-section', is_open=False)
     ], width=12)]),
 
-    # ADDED: FEATURE-A — demo CSV button (above main panels)
-    dbc.Row([dbc.Col([
-        dbc.Button("Load Demo Data", id='demo-btn', color="outline-secondary",
-                   size="sm", className="mb-2")
-    ], width=12)], className="mb-1"),
-
-    # ADDED: FEATURE-C — compact volcano threshold sliders
-    dbc.Row([
-        dbc.Col([
-            html.Label("Log2FC cutoff", className="small"),
-            dcc.Slider(id='lfc-slider', min=0.5, max=3.0, step=0.5,
-                       value=1.0, marks={0.5: '0.5', 1: '1', 2: '2', 3: '3'})
-        ], width=6),
-        dbc.Col([
-            html.Label("P-value cutoff", className="small"),
-            dcc.Slider(id='pval-slider', min=1, max=5, step=1, value=2,
-                       marks={1: '0.1', 2: '0.05', 3: '0.01', 4: '0.001', 5: '0.0001'})
-        ], width=6)
-    ], className="mb-2"),
-
-    # ── MAIN ANALYSIS PANELS ────────────────────────────
+    # ── PROFESSIONAL COCKPIT: Sidebar (col-3) + Main Content (col-9) ─────────
     dbc.Row([
 
-        # LEFT: Volcano + Heatmap (vertical stack)
-        dbc.Col([
-            dbc.Card([dbc.CardBody([
-                html.Div([
-                    html.Div([
-                        html.Span("🌋 Volcano Plot", style={'fontWeight':'600','fontSize':'14px',
-                                  'color':'#1a237e','marginBottom':'4px','display':'block'}),
-                        html.Small("Interactive differential expression analysis • Lasso select genes",
-                                   style={'color':'#666','fontSize':'11px'}),
-                        html.Div(id='volcano-stats', style={'marginTop':'4px'})
-                    ], style={'marginBottom':'8px'}),
-
-                    dcc.Graph(
-                        id='volcano-graph-obj',
-                        config={
-                            'displayModeBar': True,
-                            'scrollZoom': True,
-                            'responsive': True,
-                            'modeBarButtonsToAdd': ['lasso2d', 'select2d', 'pan2d', 'zoom2d', 'resetScale2d'],
-                            'toImageButtonOptions': {
-                                'format': 'png',
-                                'filename': f'volcano_plot_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
-                                'height': 800,
-                                'width': 1200,
-                                'scale': 2
-                            }
-                        },
-                        style={'height': '450px', 'width': '100%'}
-                    ),
-
-                    html.Hr(style={'margin':'16px 0','borderColor':'#e9ecef'}),
-
-                    html.Div([
-                        html.Span("🟥 Expression Heatmap", style={'fontWeight':'600','fontSize':'14px',
-                                  'color':'#1a237e','marginBottom':'4px','display':'block'}),
-                        html.Small("Fold-change profile of selected genes • Red=upregulated, Blue=downregulated",
-                                   style={'color':'#666','fontSize':'11px'}),
-                        html.Div(id='heatmap-stats', style={'marginTop':'4px'})
-                    ], style={'marginBottom':'8px'}),
-
-                    dcc.Graph(
-                        id='gene-heatmap-obj',
-                        config={
-                            'displayModeBar': True,
-                            'responsive': True,
-                            'toImageButtonOptions': {
-                                'format': 'png',
-                                'filename': f'expression_heatmap_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
-                                'height': 600,
-                                'width': 800,
-                                'scale': 2
-                            }
-                        },
-                        style={'height': '360px', 'width': '100%'}
-                    ),
-                ])
-            ])], className="shadow-sm")
-        ], xs=12, sm=12, md=12, lg=7, xl=7),
-
-        # RIGHT: Pathway enrichment
+        # ── LEFT SIDEBAR ─────────────────────────────────────────────────────
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader(html.Div([
-                    html.Span("🧪 Pathway Enrichment Analysis", style={'fontWeight': '700', 'fontSize': '15px'}),
-                    html.Small(" • KEGG + Reactome • Fisher exact + BH correction • Real-time validation",
-                               style={'color': '#6c757d', 'fontSize': '11px'})
-                ])),
+                dbc.CardHeader(
+                    html.Div([
+                        html.I(className="fas fa-sliders-h", style={'marginRight': '8px'}),
+                        html.Span("Analysis Controls", style={'fontWeight': '700', 'fontSize': '14px'})
+                    ], style={'color': 'white'}),
+                    style={'background': 'linear-gradient(135deg,#1a237e,#1565c0)', 'padding': '10px 14px'}
+                ),
                 dbc.CardBody([
-                    # ADDED: FEATURE-B — gene set database selector
-                    dcc.Dropdown(id='geneset-dropdown', className="mb-3",
-                        options=[
-                            {'label': 'KEGG 2021 Human',       'value': 'KEGG_2021_Human'},
-                            {'label': 'GO Biological Process',  'value': 'GO_Biological_Process_2023'},
-                            {'label': 'Reactome 2022',          'value': 'Reactome_2022'},
-                            {'label': 'MSigDB Hallmarks',       'value': 'MSigDB_Hallmark_2020'},
-                            {'label': 'WikiPathways 2023',      'value': 'WikiPathways_2023_Human'},
-                        ],
-                        value='KEGG_2021_Human', clearable=False
-                    ),
-                    dcc.Loading(
-                        type='circle',
-                        color='#1565c0',
-                        children=[
+                    # FEATURE-A: Demo button
+                    dbc.Button([
+                        html.I(className="fas fa-flask", style={'marginRight': '6px'}),
+                        "Load Demo Data"
+                    ], id='demo-btn', color="primary", size="sm", className="w-100 mb-3"),
+
+                    html.Hr(style={'margin': '8px 0', 'borderColor': '#e9ecef'}),
+
+                    # FEATURE-C: Log2FC slider
+                    html.Label("🔬 Log2FC Cutoff",
+                               style={'fontWeight': '600', 'fontSize': '12px',
+                                      'marginBottom': '4px', 'display': 'block'}),
+                    dcc.Slider(id='lfc-slider', min=0.5, max=3.0, step=0.5,
+                               value=1.0,
+                               marks={0.5: '0.5', 1: '1', 2: '2', 3: '3'},
+                               tooltip={'placement': 'bottom', 'always_visible': True}),
+
+                    html.Div(style={'marginTop': '24px'}),
+
+                    # FEATURE-C: P-value slider
+                    html.Label("📊 P-value Cutoff",
+                               style={'fontWeight': '600', 'fontSize': '12px',
+                                      'marginBottom': '4px', 'display': 'block'}),
+                    dcc.Slider(id='pval-slider', min=1, max=5, step=1, value=2,
+                               marks={1: '0.1', 2: '0.05', 3: '0.01',
+                                      4: '0.001', 5: '0.0001'},
+                               tooltip={'placement': 'bottom', 'always_visible': True}),
+
+                    html.Hr(style={'margin': '20px 0 10px 0', 'borderColor': '#e9ecef'}),
+
+                    html.P([
+                        html.I(className="fas fa-hand-pointer",
+                               style={'marginRight': '5px', 'color': '#1565c0'}),
+                        "Lasso-select genes on the volcano to run pathway enrichment."
+                    ], style={'fontSize': '11px', 'color': '#666',
+                               'lineHeight': '1.5', 'marginBottom': '0'}),
+                ], style={'padding': '14px'})
+            ], className="shadow-sm", style={'position': 'sticky', 'top': '12px'})
+        ], xs=12, md=3, style={'marginBottom': '12px'}),
+
+        # ── MAIN CONTENT ─────────────────────────────────────────────────────
+        dbc.Col([
+            dbc.Row([
+
+                # Volcano + Top Hits + Heatmap
+                dbc.Col([
+                    dbc.Card([dbc.CardBody([
+                        html.Div([
+                            html.Div([
+                                html.Span("🌋 Volcano Plot",
+                                          style={'fontWeight': '600', 'fontSize': '14px',
+                                                 'color': '#1a237e', 'marginBottom': '4px',
+                                                 'display': 'block'}),
+                                html.Small("Interactive differential expression • Lasso select genes",
+                                           style={'color': '#666', 'fontSize': '11px'}),
+                                html.Div(id='volcano-stats', style={'marginTop': '4px'})
+                            ], style={'marginBottom': '8px'}),
+
                             dcc.Graph(
-                                id='pathway-bubble-obj',
+                                id='volcano-graph-obj',
                                 config={
-                                    "displayModeBar": True,
-                                    "responsive": True,
-                                    "toImageButtonOptions": {
+                                    'displayModeBar': True,
+                                    'scrollZoom': True,
+                                    'responsive': True,
+                                    'modeBarButtonsToAdd': ['lasso2d', 'select2d', 'pan2d',
+                                                            'zoom2d', 'resetScale2d'],
+                                    'toImageButtonOptions': {
                                         'format': 'png',
-                                        'filename': f'pathway_enrichment_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
-                                        'height': 700,
-                                        'width': 900,
-                                        'scale': 2
+                                        'filename': f'volcano_plot_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+                                        'height': 800, 'width': 1200, 'scale': 2
                                     }
                                 },
                                 style={'height': '450px', 'width': '100%'}
                             ),
-                            html.Div(id='enrichment-table-container', className="mt-3")
-                        ]
-                    )
-                ])
-            ], className="shadow-sm")
-        ], xs=12, sm=12, md=12, lg=5, xl=5)
+
+                            html.Hr(style={'margin': '12px 0', 'borderColor': '#e9ecef'}),
+
+                            # ── TOP HITS QUICK-VIEW (NEW FEATURE) ──────────
+                            html.Div([
+                                html.Div([
+                                    html.Span("📋 Top Hits",
+                                              style={'fontWeight': '600', 'fontSize': '13px',
+                                                     'color': '#1a237e'}),
+                                    html.Small(" • Genes at current thresholds",
+                                               style={'color': '#666', 'fontSize': '11px',
+                                                      'marginLeft': '6px'}),
+                                    dbc.Button([
+                                        html.I(className="fas fa-download",
+                                               style={'marginRight': '4px'}),
+                                        "CSV"
+                                    ], id='download-tophits-btn',
+                                       color="outline-success", size="sm",
+                                       style={'float': 'right', 'fontSize': '10px',
+                                              'height': '24px', 'padding': '2px 8px'})
+                                ], style={'marginBottom': '6px', 'overflow': 'hidden'}),
+                                dcc.Loading(type='default', color='#1565c0', children=[
+                                    dash_table.DataTable(
+                                        id='top-hits-table',
+                                        columns=[
+                                            {'name': 'Gene',   'id': 'symbol'},
+                                            {'name': 'Log2FC', 'id': 'log2FC',
+                                             'type': 'numeric',
+                                             'format': {'specifier': '.3f'}},
+                                            {'name': 'Adj.P',  'id': 'padj',
+                                             'type': 'numeric',
+                                             'format': {'specifier': '.2e'}},
+                                            {'name': 'Status', 'id': 'status'},
+                                        ],
+                                        data=[],
+                                        filter_action='native',
+                                        sort_action='native',
+                                        sort_mode='single',
+                                        page_size=8,
+                                        style_table={'overflowX': 'auto',
+                                                     'maxHeight': '240px',
+                                                     'overflowY': 'auto'},
+                                        style_cell={'textAlign': 'left',
+                                                    'padding': '4px 8px',
+                                                    'fontSize': '11px',
+                                                    'fontFamily': 'inherit'},
+                                        style_header={'backgroundColor': '#f0f4f8',
+                                                      'fontWeight': 'bold',
+                                                      'fontSize': '11px'},
+                                        style_data_conditional=[
+                                            {'if': {'filter_query': '{status} = "Up"'},
+                                             'color': '#c62828', 'fontWeight': '600'},
+                                            {'if': {'filter_query': '{status} = "Down"'},
+                                             'color': '#1565c0', 'fontWeight': '600'},
+                                            {'if': {'row_index': 'odd'},
+                                             'backgroundColor': '#fafafa'},
+                                        ],
+                                        export_format='csv',
+                                    )
+                                ])
+                            ], style={'marginBottom': '12px'}),
+
+                            html.Hr(style={'margin': '8px 0', 'borderColor': '#e9ecef'}),
+
+                            html.Div([
+                                html.Span("🟥 Expression Heatmap",
+                                          style={'fontWeight': '600', 'fontSize': '14px',
+                                                 'color': '#1a237e', 'marginBottom': '4px',
+                                                 'display': 'block'}),
+                                html.Small("Fold-change profile of selected genes",
+                                           style={'color': '#666', 'fontSize': '11px'}),
+                                html.Div(id='heatmap-stats', style={'marginTop': '4px'})
+                            ], style={'marginBottom': '8px'}),
+
+                            dcc.Graph(
+                                id='gene-heatmap-obj',
+                                config={
+                                    'displayModeBar': True,
+                                    'responsive': True,
+                                    'toImageButtonOptions': {
+                                        'format': 'png',
+                                        'filename': f'expression_heatmap_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+                                        'height': 600, 'width': 800, 'scale': 2
+                                    }
+                                },
+                                style={'height': '360px', 'width': '100%'}
+                            ),
+                        ])
+                    ])], className="shadow-sm")
+                ], xs=12, lg=7),
+
+                # Pathway enrichment + GSEA Curve
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader(html.Div([
+                            html.Span("🧪 Pathway Enrichment",
+                                      style={'fontWeight': '700', 'fontSize': '15px'}),
+                            html.Small(" • Fisher exact + BH correction",
+                                       style={'color': '#6c757d', 'fontSize': '11px'})
+                        ])),
+                        dbc.CardBody([
+                            # FEATURE-B — gene set database selector
+                            dcc.Dropdown(id='geneset-dropdown', className="mb-3",
+                                options=[
+                                    {'label': 'KEGG 2021 Human',
+                                     'value': 'KEGG_2021_Human'},
+                                    {'label': 'GO Biological Process',
+                                     'value': 'GO_Biological_Process_2023'},
+                                    {'label': 'Reactome 2022',
+                                     'value': 'Reactome_2022'},
+                                    {'label': 'MSigDB Hallmarks',
+                                     'value': 'MSigDB_Hallmark_2020'},
+                                    {'label': 'WikiPathways 2023',
+                                     'value': 'WikiPathways_2023_Human'},
+                                ],
+                                value='KEGG_2021_Human', clearable=False
+                            ),
+                            dcc.Loading(
+                                type='circle', color='#1565c0',
+                                children=[
+                                    dcc.Graph(
+                                        id='pathway-bubble-obj',
+                                        config={
+                                            "displayModeBar": True,
+                                            "responsive": True,
+                                            "toImageButtonOptions": {
+                                                'format': 'png',
+                                                'filename': f'pathway_enrichment_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+                                                'height': 700, 'width': 900, 'scale': 2
+                                            }
+                                        },
+                                        style={'height': '450px', 'width': '100%'}
+                                    ),
+                                    html.Div(id='enrichment-table-container',
+                                             className="mt-3")
+                                ]
+                            ),
+
+                            # ── GSEA ENRICHMENT CURVE (NEW FEATURE) ────────
+                            html.Hr(style={'margin': '12px 0', 'borderColor': '#e9ecef'}),
+                            html.Div([
+                                html.Span("📈 GSEA Enrichment Curve",
+                                          style={'fontWeight': '600', 'fontSize': '13px',
+                                                 'color': '#1a237e'}),
+                                html.Small(" • Click a pathway bubble to render",
+                                           style={'color': '#888', 'fontSize': '11px',
+                                                  'marginLeft': '6px'})
+                            ], style={'marginBottom': '6px'}),
+                            dcc.Loading(type='default', color='#1565c0',
+                                children=dcc.Graph(
+                                    id='gsea-curve-graph',
+                                    config={'displayModeBar': True, 'responsive': True},
+                                    style={'height': '280px', 'width': '100%'}
+                                )
+                            )
+                        ])
+                    ], className="shadow-sm")
+                ], xs=12, lg=5)
+
+            ], className="g-3")
+        ], xs=12, md=9)
+
     ], className="mb-3"),
 
     # ── ADVANCED ANALYSIS SUMMARY ───────────────────────
@@ -747,6 +871,7 @@ app.layout = dbc.Container([
     dcc.Store(id='gsea-results-store', data={}),
     dcc.Store(id='volcano-filter-genes', data=[]),
     dcc.Store(id='enrichment-results-store'),  # FIXED: BUG-1
+    dcc.Download(id='download-tophits'),       # ADDED: export top hits
     dcc.Store(id='session-store', data={'session_id': create_session_id(), 'start_time': datetime.now().isoformat()}),
     dcc.Store(id='analysis-metadata', data={}),
     dcc.Store(id='gsea-store', data={}),
@@ -1105,6 +1230,90 @@ def load_demo(n):
         csv_str = f.read()
     encoded = base64.b64encode(csv_str.encode()).decode()
     return f"data:text/csv;base64,{encoded}", "demo_dge.csv"
+
+
+# ── CALLBACK: Top Hits Quick-View table ──────────────────────────────────────
+
+@app.callback(
+    Output('top-hits-table', 'data'),
+    Input('dge-data-store', 'data'),
+    Input('lfc-thresh-slider', 'value'),
+    Input('padj-thresh-dd', 'value'),
+    Input('lfc-slider', 'value'),
+    Input('pval-slider', 'value'),
+    prevent_initial_call=True
+)
+def update_top_hits(stored_data, lfc_thresh, p_thresh, lfc_slider_val, pval_slider_val):
+    if not stored_data:
+        return []
+    # Use compact sliders when they triggered
+    tid = ctx.triggered_id
+    if tid == 'lfc-slider' and lfc_slider_val is not None:
+        lfc_thresh = lfc_slider_val
+    if tid == 'pval-slider' and pval_slider_val is not None:
+        p_thresh = 10 ** (-pval_slider_val)
+
+    df = pd.DataFrame(stored_data)
+    sig = df[(df['log2FC'].abs() > lfc_thresh) & (df['padj'] < p_thresh)].copy()
+    sig['status'] = sig['log2FC'].apply(lambda v: 'Up' if v > 0 else 'Down')
+    sig = sig.sort_values('padj').head(200)
+    return sig[['symbol', 'log2FC', 'padj', 'status']].to_dict('records')
+
+
+# ── CALLBACK: Download Top Hits as CSV ───────────────────────────────────────
+
+@app.callback(
+    Output('download-tophits', 'data'),
+    Input('download-tophits-btn', 'n_clicks'),
+    State('dge-data-store', 'data'),
+    State('lfc-thresh-slider', 'value'),
+    State('padj-thresh-dd', 'value'),
+    State('lfc-slider', 'value'),
+    State('pval-slider', 'value'),
+    prevent_initial_call=True
+)
+def download_top_hits(n, stored_data, lfc_thresh, p_thresh,
+                      lfc_slider_val, pval_slider_val):
+    if not n or not stored_data:
+        return dash.no_update
+    # Resolve active thresholds
+    if lfc_slider_val is not None:
+        lfc_thresh = lfc_slider_val
+    if pval_slider_val is not None:
+        p_thresh = 10 ** (-pval_slider_val)
+
+    df = pd.DataFrame(stored_data)
+    sig = df[(df['log2FC'].abs() > lfc_thresh) & (df['padj'] < p_thresh)].copy()
+    sig['status'] = sig['log2FC'].apply(lambda v: 'Up' if v > 0 else 'Down')
+    sig = sig.sort_values('padj')
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return dcc.send_data_frame(sig.to_csv, f'top_hits_{ts}.csv', index=False)
+
+
+# ── CALLBACK: GSEA Enrichment Curve ──────────────────────────────────────────
+
+@app.callback(
+    Output('gsea-curve-graph', 'figure'),
+    Input('pathway-bubble-obj', 'clickData'),
+    State('enrichment-results-store', 'data'),
+    State('dge-data-store', 'data'),
+    prevent_initial_call=True
+)
+def render_gsea_curve(clickData, enrichment_json, stored_data):
+    empty = create_gsea_plot('', [], None)
+    if not clickData or not enrichment_json or not stored_data:
+        return empty
+    try:
+        term = clickData['points'][0]['y']
+        enr_df = pd.read_json(io.StringIO(enrichment_json), orient='records')
+        row = enr_df[enr_df['Term'] == term]
+        if row.empty:
+            return empty
+        genes = [g.strip() for g in str(row.iloc[0]['Genes']).split(';') if g.strip()]
+        ranked_df = pd.DataFrame(stored_data)
+        return create_gsea_plot(term, genes, ranked_df)
+    except Exception:
+        return empty
 
 
 # ── CALLBACK 5: Data Quality Indicators ──────────────────────────────────────
