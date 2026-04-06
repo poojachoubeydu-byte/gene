@@ -6,6 +6,7 @@ Provides comprehensive pre-flight validation with recovery suggestions
 import pandas as pd
 import numpy as np
 import logging
+from dash import html
 
 logger = logging.getLogger(__name__)
 
@@ -337,44 +338,97 @@ class DataValidator:
         }
     
     def get_summary_html(self):
-        """Generate HTML summary of validation results"""
-        html_parts = []
-        
-        # Errors section
+        """Generate a Dash component summary of validation results"""
+        summary_blocks = []
+
         if self.errors:
-            html_parts.append('<div class="alert alert-danger">')
-            html_parts.append('<h6>❌ Critical Issues (must fix):</h6>')
+            error_children = [
+                html.H6("❌ Critical Issues (must fix):", style={'marginTop': '0', 'marginBottom': '8px'})
+            ]
             for error in self.errors:
-                html_parts.append(f'<p><strong>{error.category}:</strong> {error.message}</p>')
+                error_children.append(
+                    html.Div([
+                        html.Strong(f"{error.category}: "),
+                        html.Span(error.message)
+                    ], style={'marginBottom': '6px', 'fontSize': '12px'})
+                )
                 if error.recovery_suggestions:
-                    html_parts.append('<ul style="margin: 4px 0; padding-left: 20px; font-size: 11px;">')
-                    for suggestion in error.recovery_suggestions:
-                        html_parts.append(f'<li>{suggestion}</li>')
-                    html_parts.append('</ul>')
-            html_parts.append('</div>')
-        
-        # Warnings section
+                    error_children.append(
+                        html.Ul(
+                            [html.Li(s, style={'fontSize': '11px'}) for s in error.recovery_suggestions],
+                            style={'margin': '4px 0 8px 16px', 'paddingLeft': '16px'}
+                        )
+                    )
+
+            summary_blocks.append(
+                html.Div(error_children, style={
+                    'backgroundColor': '#fdecea',
+                    'border': '1px solid #f5c6cb',
+                    'borderRadius': '6px',
+                    'padding': '12px',
+                    'marginBottom': '12px'
+                })
+            )
+
         if self.warnings:
-            html_parts.append('<div class="alert alert-warning">')
-            html_parts.append('<h6>⚠️ Warnings (review recommended):</h6>')
+            warning_children = [
+                html.H6("⚠️ Warnings (review recommended):", style={'marginTop': '0', 'marginBottom': '8px'})
+            ]
             for warning in self.warnings:
-                html_parts.append(f'<p><strong>{warning.category}:</strong> {warning.message}</p>')
+                warning_children.append(
+                    html.Div([
+                        html.Strong(f"{warning.category}: "),
+                        html.Span(warning.message)
+                    ], style={'marginBottom': '6px', 'fontSize': '12px'})
+                )
                 if warning.recovery_suggestions:
-                    html_parts.append('<ul style="margin: 4px 0; padding-left: 20px; font-size: 11px;">')
-                    for suggestion in warning.recovery_suggestions[:2]:  # Limit to 2 suggestions
-                        html_parts.append(f'<li>{suggestion}</li>')
-                    html_parts.append('</ul>')
-            html_parts.append('</div>')
-        
-        # Info section
+                    warning_children.append(
+                        html.Ul(
+                            [html.Li(s, style={'fontSize': '11px'}) for s in warning.recovery_suggestions],
+                            style={'margin': '4px 0 8px 16px', 'paddingLeft': '16px'}
+                        )
+                    )
+
+            summary_blocks.append(
+                html.Div(warning_children, style={
+                    'backgroundColor': '#fff4e5',
+                    'border': '1px solid #ffeeba',
+                    'borderRadius': '6px',
+                    'padding': '12px',
+                    'marginBottom': '12px'
+                })
+            )
+
         if self.info_messages:
-            html_parts.append('<div class="alert alert-info">')
-            html_parts.append('<h6>ℹ️ Information:</h6>')
+            info_children = [
+                html.H6("ℹ️ Information:", style={'marginTop': '0', 'marginBottom': '8px'})
+            ]
             for info in self.info_messages:
-                html_parts.append(f'<p><small>{info.message}</small></p>')
-            html_parts.append('</div>')
-        
-        return ''.join(html_parts)
+                info_children.append(
+                    html.Div(info.message, style={'marginBottom': '6px', 'fontSize': '12px'})
+                )
+                if info.recovery_suggestions:
+                    info_children.append(
+                        html.Ul(
+                            [html.Li(s, style={'fontSize': '11px'}) for s in info.recovery_suggestions],
+                            style={'margin': '4px 0 8px 16px', 'paddingLeft': '16px'}
+                        )
+                    )
+
+            summary_blocks.append(
+                html.Div(info_children, style={
+                    'backgroundColor': '#e8f4fd',
+                    'border': '1px solid #b6d4ff',
+                    'borderRadius': '6px',
+                    'padding': '12px',
+                    'marginBottom': '12px'
+                })
+            )
+
+        if not summary_blocks:
+            return None
+
+        return html.Div(summary_blocks, style={'fontSize': '12px'})
 
 
 def validate_deg_data(df):

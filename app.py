@@ -205,7 +205,12 @@ app.layout = dbc.Container([
                   duration=8000, style={'fontSize': '13px'})
     ], width=12)]),
 
-    # ── DATA QUALITY INDICATORS ─────────────────────────
+    # ── UPLOAD VALIDATION ALERT ─────────────────────────
+    dbc.Row([dbc.Col([
+        dbc.Alert(id='upload-validation-alert', is_open=False, dismissable=True,
+                  duration=10000, style={'fontSize': '12px'})
+    ], width=12)]),
+
     dbc.Row([dbc.Col([
         html.Div(id='data-quality-panel', style={'marginBottom':'12px'})
     ], width=12)]),
@@ -787,6 +792,9 @@ app.layout = dbc.Container([
     Output('main-alert', 'color'),
     Output('main-alert', 'is_open'),
     Output('help-panel', 'is_open'),
+    Output('upload-validation-alert', 'children'),
+    Output('upload-validation-alert', 'color'),
+    Output('upload-validation-alert', 'is_open'),
     Input('main-upload-comp', 'contents'),
     Input('load-demo-btn', 'n_clicks'),
     Input('lfc-thresh-slider', 'value'),
@@ -802,6 +810,9 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
     triggered = ctx.triggered_id
 
     df = None
+    validation_msg = dash.no_update
+    validation_color = dash.no_update
+    validation_open = False
 
     if triggered == 'load-demo-btn' and n_clicks:
         df = DEMO_DF.copy()
@@ -816,22 +827,22 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
             df, errors, warnings, html_summary = validate_deg_data(temp_df)
 
             if errors:
-                msg = html.Div([
-                    html.Div(html.Div(dangerously_allow_html=True, innerHTML=html_summary),
-                            style={'marginBottom': '12px'})
-                ], style={'fontSize': '12px'})
                 empty_fig = create_volcano_plot(pd.DataFrame(columns=['log2_fold_change', 'adjusted_p_value', 'gene_symbol']),
                                                 'log2_fold_change', 'adjusted_p_value', 'gene_symbol')
-                return None, empty_fig, dash.no_update, msg, 'danger', True, True
+                return (None, empty_fig, dash.no_update, 
+                        dash.no_update, dash.no_update, False, True,
+                        html_summary, 'danger', True)
 
             if warnings or html_summary:
                 logger.warning(f"Data validation: {len(warnings)} warnings")
-                # Show validation details as info alert
-                msg = html.Div([
-                    html.Div(html.Div(dangerously_allow_html=True, innerHTML=html_summary),
-                            style={'marginBottom': '8px'})
-                ], style={'fontSize': '12px'})
-                # Don't treat warnings as blocking, just inform the user
+                # Show validation details as warning alert, but continue loading data
+                validation_msg = html_summary
+                validation_color = 'warning'
+                validation_open = True
+            else:
+                validation_msg = dash.no_update
+                validation_color = dash.no_update
+                validation_open = False
 
             # Rename columns to match expected format
             df = df.rename(columns={
@@ -843,7 +854,9 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
         except Exception as e:
             logger.error(f"Upload error: {e}")
             msg = f"Could not parse file: {str(e)}. Ensure it is a comma-separated CSV with required columns."
-            return None, dash.no_update, dash.no_update, msg, 'danger', True, True
+            return (None, dash.no_update, dash.no_update, 
+                    msg, 'danger', True, True,
+                    dash.no_update, dash.no_update, False)
 
     elif existing_data and triggered in ('lfc-thresh-slider', 'padj-thresh-dd', 'volcano-filter-genes'):
         df = pd.DataFrame(existing_data)
@@ -851,7 +864,9 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
     else:
         empty_fig = create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']),
                                         'log2FC', 'padj', 'symbol')
-        return None, empty_fig, dash.no_update, dash.no_update, dash.no_update, False, True
+        return (None, empty_fig, dash.no_update, 
+                dash.no_update, dash.no_update, False, True,
+                dash.no_update, dash.no_update, False)
 
     fig = create_volcano_plot(df, 'log2FC', 'padj', 'symbol',
                                lfc_thresh=lfc_thresh, p_thresh=p_thresh,
@@ -897,7 +912,8 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
                    f"Use lasso selection on the volcano plot to explore pathways.")
 
     return (df.to_dict('records'), fig, summary,
-            success_msg, 'success', True, False)
+            success_msg, 'success', True, False,
+            validation_msg, validation_color, validation_open)
 
 
 # ── CALLBACK 2: Lasso selection → pathway enrichment + heatmap ───────────────
