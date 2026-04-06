@@ -14,12 +14,21 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
     d = df.copy()
 
     if d.empty or logfc_col not in d.columns:
-        return go.Figure().update_layout(
+        fig = go.Figure().update_layout(
             title="Load data or click Load Demo to begin",
             template='simple_white',
             xaxis_title="Log2 Fold Change",
             yaxis_title="-log10(Adjusted P-value)"
         )
+        # ADDED: FEATURE-D — empty state annotation when no data at all
+        if len(df) == 0:
+            fig.add_annotation(
+                text="⬆ Upload a DESeq2 / edgeR CSV or click Load Demo Data",
+                xref="paper", yref="paper", x=0.5, y=0.5,
+                showarrow=False, font=dict(size=15, color="#aaaaaa"),
+                align="center"
+            )
+        return fig
 
     d['minus_log10_p'] = -np.log10(d[padj_col].replace(0, 1e-300))
 
@@ -106,11 +115,11 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
     return fig
 
 
-def create_pathway_enrichment(selected_genes):
+def create_pathway_enrichment(selected_genes, gene_sets='KEGG_2021_Human'):  # ADDED: FEATURE-B
     """
-    ORA via GSEApy Enrichr against KEGG_2021_Human and Reactome_2022.
+    ORA via GSEApy Enrichr against selected gene set database.
     Statistical method: Fisher exact test, Benjamini-Hochberg correction.
-    ALWAYS returns (fig, table_component, gene_index_dict) — exactly 3 values.
+    ALWAYS returns (fig, table_component, gene_index_dict, enrichment_json) — exactly 4 values.
     """
 
     # ── Guard: too few genes ─────────────────────────────
@@ -123,13 +132,13 @@ def create_pathway_enrichment(selected_genes):
             "Select at least 5 genes using lasso selection on the volcano plot.",
             style={'color': '#666', 'fontStyle': 'italic', 'padding': '10px'}
         )
-        return fig, msg, {}
+        return fig, msg, {}, None  # FIXED: BUG-1
 
     # ── Run Enrichr ──────────────────────────────────────
     try:
         enr = gp.enrichr(
             gene_list=selected_genes,
-            gene_sets=['KEGG_2021_Human', 'Reactome_2022'],
+            gene_sets=gene_sets if gene_sets else 'KEGG_2021_Human',  # ADDED: FEATURE-B
             outdir=None,
             cutoff=0.05
         )
@@ -143,7 +152,7 @@ def create_pathway_enrichment(selected_genes):
             f"Enrichr API error: {str(e)[:120]}. Please retry.",
             style={'color': '#c0392b', 'padding': '10px', 'fontSize': '12px'}
         )
-        return fig, msg, {}
+        return fig, msg, {}, None  # FIXED: BUG-1
 
     # ── Filter significant results ───────────────────────
     results = results[results['Adjusted P-value'] < 0.05].copy()
@@ -158,17 +167,15 @@ def create_pathway_enrichment(selected_genes):
             "Try selecting more genes or relaxing thresholds.",
             style={'color': '#666', 'padding': '10px', 'fontSize': '12px'}
         )
-        return fig, msg, {}
+        return fig, msg, {}, None  # FIXED: BUG-1
 
-    # ── Fix Overlap: "3/120" → integer 3 ────────────────
-    results['overlap_count'] = (
-        results['Overlap'].str.split('/').str[0].astype(int)
+    # FIXED: BUG-2 — robust Overlap parsing ("5/100" or plain int); proper sizeref
+    results = results.copy()
+    results['overlap_count'] = results['Overlap'].apply(
+        lambda x: int(str(x).split('/')[0]) if '/' in str(x) else int(x)
     )
-    min_o = results['overlap_count'].min()
-    max_o = results['overlap_count'].max()
-    results['bubble_size'] = (
-        8 + 32 * (results['overlap_count'] - min_o) / max(max_o - min_o, 1)
-    )
+    max_overlap = results['overlap_count'].max()
+    sizeref = 2.0 * max_overlap / (30 ** 2) if max_overlap > 0 else 1
 
     # ── Sort and limit ───────────────────────────────────
     results = results.sort_values('Combined Score', ascending=False).head(20)
@@ -205,8 +212,9 @@ def create_pathway_enrichment(selected_genes):
         y=results['Term_display'],
         mode='markers',
         marker=dict(
-            size=results['bubble_size'].tolist(),
+            size=results['overlap_count'].tolist(),  # FIXED: BUG-2
             sizemode='diameter',
+            sizeref=sizeref,                         # FIXED: BUG-2
             color=neg_log_p.tolist(),
             colorscale='RdYlBu',
             reversescale=True,
@@ -251,9 +259,9 @@ def create_pathway_enrichment(selected_genes):
     )
 
     # ── Table ─────────────────────────────────────────────
-    table_cols_base = ['Term', 'Overlap', 'Adjusted P-value']
+    table_cols_base = ['Term', 'overlap_count', 'Adjusted P-value']  # FIXED: FEATURE-E
     if 'Gene_set' in results.columns:
-        table_cols_base = ['Term', 'Gene_set', 'Overlap', 'Adjusted P-value']
+        table_cols_base = ['Term', 'Gene_set', 'overlap_count', 'Adjusted P-value']  # FIXED: FEATURE-E
     table_cols_present = table_cols_base + [score_col]
 
     table = dash_table.DataTable(
@@ -261,7 +269,7 @@ def create_pathway_enrichment(selected_genes):
         columns=[
             {'name': 'Pathway',    'id': 'Term'},
             {'name': 'Database',   'id': 'Gene_set'},
-            {'name': 'Overlap',    'id': 'Overlap'},
+            {'name': 'Genes in Overlap', 'id': 'overlap_count', 'type': 'numeric'},  # FIXED: FEATURE-E
             {'name': 'Adj. P-val', 'id': 'Adjusted P-value',
              'type': 'numeric', 'format': {'specifier': '.2e'}},
             {'name': 'Score',      'id': score_col,
@@ -282,8 +290,11 @@ def create_pathway_enrichment(selected_genes):
         page_size=10
     )
 
-    # ── CRITICAL: always return exactly 3 values ─────────
-    return fig, table, gene_index_dict
+    # FIXED: BUG-1 — serialize enrichment results for enrichment-results-store
+    enrichment_json = results[['Term', 'Genes']].to_json(orient='records')
+
+    # ── CRITICAL: always return exactly 4 values ─────────
+    return fig, table, gene_index_dict, enrichment_json
 
 
 def create_heatmap(df, selected_genes):
@@ -311,6 +322,23 @@ def create_heatmap(df, selected_genes):
         )
 
     filtered = filtered.sort_values('log2FC', ascending=True)
+
+    # FIXED: BUG-5 — fall back to bar chart when no per-sample expression columns exist
+    numeric_df = filtered.select_dtypes(include=[np.number])
+    sample_cols = [c for c in numeric_df.columns
+                   if c not in ['log2FC', 'padj', 'baseMean', 'lfcSE', 'stat', 'pvalue']]
+    if len(sample_cols) < 2:
+        bar_df = filtered[['symbol', 'log2FC']].dropna()
+        fig = go.Figure(go.Bar(
+            x=bar_df['symbol'], y=bar_df['log2FC'],
+            marker_color=['#E31A1C' if v > 0 else '#1F78B4' for v in bar_df['log2FC']]
+        ))
+        fig.update_layout(
+            title='Log2 Fold Change of Selected Genes (upload expression matrix for heatmap)',
+            xaxis_title='Gene', yaxis_title='Log2FC',
+            template='simple_white'
+        )
+        return fig
 
     z = [[float(v)] for v in filtered['log2FC'].tolist()]
     y_labels = filtered['symbol'].tolist()
@@ -351,7 +379,11 @@ def create_heatmap(df, selected_genes):
         ),
         template='simple_white',
         margin=dict(l=180, r=40, t=50, b=30),
+        # FIXED: BUG-3 — explicit tick positioning so labels render on correct rows
         yaxis=dict(
+            tickmode='array',
+            tickvals=list(range(len(filtered))),
+            ticktext=filtered['symbol'].tolist(),
             tickfont=dict(size=10),
             automargin=True,
             ticklabelposition='outside left'

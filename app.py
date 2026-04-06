@@ -306,7 +306,11 @@ app.layout = dbc.Container([
                     html.Div([
                         html.Small("Max 10MB • CSV format required",
                                    style={'color':'#6c757d','fontSize':'10px'})
-                    ], style={'marginTop':'4px'})
+                    ], style={'marginTop':'4px'}),
+                    # FIXED: BUG-4 — upload-specific feedback alert
+                    dbc.Alert(id='upload-alert', is_open=False, dismissable=True,
+                              className="mt-2",
+                              style={'fontSize': '11px', 'padding': '6px 10px'})
                 ], style={'flexShrink': '1', 'minWidth': '120px'}),
 
                 # Demo Button
@@ -499,6 +503,26 @@ app.layout = dbc.Container([
         ], id='batch-mode-section', is_open=False)
     ], width=12)]),
 
+    # ADDED: FEATURE-A — demo CSV button (above main panels)
+    dbc.Row([dbc.Col([
+        dbc.Button("Load Demo Data", id='demo-btn', color="outline-secondary",
+                   size="sm", className="mb-2")
+    ], width=12)], className="mb-1"),
+
+    # ADDED: FEATURE-C — compact volcano threshold sliders
+    dbc.Row([
+        dbc.Col([
+            html.Label("Log2FC cutoff", className="small"),
+            dcc.Slider(id='lfc-slider', min=0.5, max=3.0, step=0.5,
+                       value=1.0, marks={0.5: '0.5', 1: '1', 2: '2', 3: '3'})
+        ], width=6),
+        dbc.Col([
+            html.Label("P-value cutoff", className="small"),
+            dcc.Slider(id='pval-slider', min=1, max=5, step=1, value=2,
+                       marks={1: '0.1', 2: '0.05', 3: '0.01', 4: '0.001', 5: '0.0001'})
+        ], width=6)
+    ], className="mb-2"),
+
     # ── MAIN ANALYSIS PANELS ────────────────────────────
     dbc.Row([
 
@@ -570,6 +594,17 @@ app.layout = dbc.Container([
                                style={'color': '#6c757d', 'fontSize': '11px'})
                 ])),
                 dbc.CardBody([
+                    # ADDED: FEATURE-B — gene set database selector
+                    dcc.Dropdown(id='geneset-dropdown', className="mb-3",
+                        options=[
+                            {'label': 'KEGG 2021 Human',       'value': 'KEGG_2021_Human'},
+                            {'label': 'GO Biological Process',  'value': 'GO_Biological_Process_2023'},
+                            {'label': 'Reactome 2022',          'value': 'Reactome_2022'},
+                            {'label': 'MSigDB Hallmarks',       'value': 'MSigDB_Hallmark_2020'},
+                            {'label': 'WikiPathways 2023',      'value': 'WikiPathways_2023_Human'},
+                        ],
+                        value='KEGG_2021_Human', clearable=False
+                    ),
                     dcc.Loading(
                         type='circle',
                         color='#1565c0',
@@ -711,6 +746,7 @@ app.layout = dbc.Container([
     dcc.Store(id='dge-data-store'),
     dcc.Store(id='gsea-results-store', data={}),
     dcc.Store(id='volcano-filter-genes', data=[]),
+    dcc.Store(id='enrichment-results-store'),  # FIXED: BUG-1
     dcc.Store(id='session-store', data={'session_id': create_session_id(), 'start_time': datetime.now().isoformat()}),
     dcc.Store(id='analysis-metadata', data={}),
     dcc.Store(id='gsea-store', data={}),
@@ -838,19 +874,31 @@ app.layout = dbc.Container([
     Output('upload-validation-alert', 'children'),
     Output('upload-validation-alert', 'color'),
     Output('upload-validation-alert', 'is_open'),
+    Output('upload-alert', 'children'),   # FIXED: BUG-4
+    Output('upload-alert', 'color'),      # FIXED: BUG-4
+    Output('upload-alert', 'is_open'),    # FIXED: BUG-4
     Input('main-upload-comp', 'contents'),
     Input('load-demo-btn', 'n_clicks'),
     Input('lfc-thresh-slider', 'value'),
     Input('padj-thresh-dd', 'value'),
     Input('volcano-filter-genes', 'data'),
+    Input('lfc-slider', 'value'),         # ADDED: FEATURE-C
+    Input('pval-slider', 'value'),        # ADDED: FEATURE-C
     State('main-upload-comp', 'filename'),
     State('dge-data-store', 'data'),
     prevent_initial_call=False
 )
 def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
-                             filtered_genes, filename, existing_data):
+                             filtered_genes, lfc_slider_val, pval_slider_val,
+                             filename, existing_data):
 
     triggered = ctx.triggered_id
+
+    # ADDED: FEATURE-C — compact slider overrides when triggered
+    if triggered == 'lfc-slider' and lfc_slider_val is not None:
+        lfc_thresh = lfc_slider_val
+    if triggered == 'pval-slider' and pval_slider_val is not None:
+        p_thresh = 10 ** (-pval_slider_val)
 
     df = None
     validation_msg = dash.no_update
@@ -872,9 +920,15 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
             if errors:
                 empty_fig = create_volcano_plot(pd.DataFrame(columns=['log2_fold_change', 'adjusted_p_value', 'gene_symbol']),
                                                 'log2_fold_change', 'adjusted_p_value', 'gene_symbol')
-                return (None, empty_fig, dash.no_update, 
+                # FIXED: BUG-4 — explicit column-detection failure message
+                col_fail_msg = (
+                    f"Column detection failed. Found: {list(temp_df.columns)}. "
+                    "Expected one of: [log2fc/logfc/lfc] [padj/fdr/qvalue] [symbol/gene/id]"
+                )
+                return (None, empty_fig, dash.no_update,
                         dash.no_update, dash.no_update, False, True,
-                        html_summary, 'danger', True)
+                        html_summary, 'danger', True,
+                        col_fail_msg, 'danger', True)
 
             if warnings or html_summary:
                 logger.warning(f"Data validation: {len(warnings)} warnings")
@@ -897,19 +951,22 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
         except Exception as e:
             logger.error(f"Upload error: {e}")
             msg = f"Could not parse file: {str(e)}. Ensure it is a comma-separated CSV with required columns."
-            return (None, dash.no_update, dash.no_update, 
+            return (None, dash.no_update, dash.no_update,
                     msg, 'danger', True, True,
-                    dash.no_update, dash.no_update, False)
+                    dash.no_update, dash.no_update, False,
+                    f"Parse error: {str(e)}", 'danger', True)  # FIXED: BUG-4
 
-    elif existing_data and triggered in ('lfc-thresh-slider', 'padj-thresh-dd', 'volcano-filter-genes'):
+    elif existing_data and triggered in ('lfc-thresh-slider', 'padj-thresh-dd', 'volcano-filter-genes',
+                                          'lfc-slider', 'pval-slider'):  # ADDED: FEATURE-C
         df = pd.DataFrame(existing_data)
 
     else:
         empty_fig = create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']),
                                         'log2FC', 'padj', 'symbol')
-        return (None, empty_fig, dash.no_update, 
+        return (None, empty_fig, dash.no_update,
                 dash.no_update, dash.no_update, False, True,
-                dash.no_update, dash.no_update, False)
+                dash.no_update, dash.no_update, False,
+                dash.no_update, dash.no_update, False)  # FIXED: BUG-4
 
     fig = create_volcano_plot(df, 'log2FC', 'padj', 'symbol',
                                lfc_thresh=lfc_thresh, p_thresh=p_thresh,
@@ -954,9 +1011,13 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
                    f"log2FC>{lfc_thresh}, padj<{p_thresh}. "
                    f"Use lasso selection on the volcano plot to explore pathways.")
 
+    # FIXED: BUG-4 — upload-alert success message
+    upload_alert_content = (f"\u2713 Loaded {len(df)} genes from {filename}"
+                            if filename else f"\u2713 Loaded {len(df)} genes")
     return (df.to_dict('records'), fig, summary,
             success_msg, 'success', True, False,
-            validation_msg, validation_color, validation_open)
+            validation_msg, validation_color, validation_open,
+            upload_alert_content, 'success', True)
 
 
 # ── CALLBACK 2: Lasso selection → pathway enrichment + heatmap ───────────────
@@ -966,11 +1027,13 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
     Output('gene-heatmap-obj', 'figure'),
     Output('enrichment-table-container', 'children'),
     Output('gsea-results-store', 'data'),
+    Output('enrichment-results-store', 'data'),  # FIXED: BUG-1
     Input('volcano-graph-obj', 'selectedData'),
+    Input('geneset-dropdown', 'value'),           # ADDED: FEATURE-B
     State('dge-data-store', 'data'),
     prevent_initial_call=True
 )
-def run_enrichment_on_selection(selectedData, stored_data):
+def run_enrichment_on_selection(selectedData, gene_set, stored_data):
     empty_pathway = go.Figure().update_layout(
         title="\u2196 Use lasso selection on the volcano plot to run pathway enrichment",
         template='simple_white'
@@ -980,32 +1043,41 @@ def run_enrichment_on_selection(selectedData, stored_data):
                        style={'color': '#888', 'fontStyle': 'italic', 'padding': '8px'})
 
     if not selectedData or not selectedData.get('points') or not stored_data:
-        return empty_pathway, empty_heatmap, empty_msg, {}
+        return empty_pathway, empty_heatmap, empty_msg, {}, None  # FIXED: BUG-1
 
     selected_genes = list(dict.fromkeys(
         [p['customdata'] for p in selectedData['points'] if 'customdata' in p]
     ))
 
-    pathway_fig, table, gene_index_dict = create_pathway_enrichment(selected_genes)
+    # FIXED: BUG-1, ADDED: FEATURE-B — unpack 4 values, pass gene_set
+    pathway_fig, table, gene_index_dict, enrichment_json = create_pathway_enrichment(
+        selected_genes, gene_sets=gene_set
+    )
     heatmap_fig = create_heatmap(pd.DataFrame(stored_data), selected_genes)
 
-    return pathway_fig, heatmap_fig, table, gene_index_dict
+    return pathway_fig, heatmap_fig, table, gene_index_dict, enrichment_json  # FIXED: BUG-1
 
 
 # ── CALLBACK 3: Pathway bubble click → highlight genes on volcano ─────────────
 
+# FIXED: BUG-1 — use enrichment-results-store (DataFrame JSON) for reliable gene lookup
 @app.callback(
     Output('volcano-filter-genes', 'data'),
     Input('pathway-bubble-obj', 'clickData'),
-    State('gsea-results-store', 'data'),
+    State('enrichment-results-store', 'data'),  # FIXED: BUG-1
     prevent_initial_call=True
 )
-def filter_volcano_by_pathway(clickData, gene_index_dict):
-    if not clickData or not gene_index_dict:
+def filter_volcano_by_pathway(clickData, enrichment_json):
+    if not clickData or not enrichment_json:
         return []
     try:
-        clicked_term = clickData['points'][0]['y']
-        return gene_index_dict.get(clicked_term, [])
+        term = clickData['points'][0]['y']
+        enr_df = pd.read_json(io.StringIO(enrichment_json), orient='records')
+        row = enr_df[enr_df['Term'] == term]
+        if row.empty:
+            return []
+        genes_str = row.iloc[0]['Genes']
+        return [g.strip() for g in str(genes_str).split(';') if g.strip()]
     except Exception:
         return []
 
@@ -1019,6 +1091,20 @@ def filter_volcano_by_pathway(clickData, gene_index_dict):
 )
 def reset_selection(n_clicks):
     return []
+
+
+# ADDED: FEATURE-A — demo CSV loader sets upload component contents
+@app.callback(
+    Output('main-upload-comp', 'contents'),
+    Output('main-upload-comp', 'filename'),
+    Input('demo-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def load_demo(n):
+    with open('data/demo_dge.csv', 'r') as f:
+        csv_str = f.read()
+    encoded = base64.b64encode(csv_str.encode()).decode()
+    return f"data:text/csv;base64,{encoded}", "demo_dge.csv"
 
 
 # ── CALLBACK 5: Data Quality Indicators ──────────────────────────────────────
