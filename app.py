@@ -7,6 +7,30 @@ import io, base64, logging, json, hashlib, time
 from datetime import datetime
 from collections import Counter
 import plotly.graph_objects as go
+from plotly.offline import plot
+import plotly.io as pio
+
+# Configure Plotly to serve assets locally and avoid external CDN issues
+pio.templates.default = "plotly"
+plotly_config = {
+    'displayModeBar': True,
+    'displaylogo': False,
+    'modeBarButtonsToRemove': ['pan2d', 'lasso2d', 'select2d'],
+    'responsive': True,
+    'config': {
+        'mathjax': None,  # Disable MathJax
+        'katex': None     # Disable KaTeX
+    }
+}
+
+# Configure Plotly to not use external CDN and disable math rendering
+import plotly
+plotly.io.renderers.default = 'browser'
+plotly.offline.init_notebook_mode(connected=False)
+
+# Disable KaTeX math rendering to avoid external CDN calls
+plotly_config['staticPlot'] = True
+
 from modules.plots import (
     create_volcano_plot,
     create_heatmap,
@@ -124,7 +148,9 @@ def create_session_id():
 
 app = dash.Dash(__name__,
                 external_stylesheets=[],
+                external_scripts=[],
                 suppress_callback_exceptions=True,
+                serve_locally=True,  # Serve assets locally instead of CDN
                 meta_tags=[
                     {"name": "viewport", "content": "width=device-width, initial-scale=1"},
                     {"name": "description", "content": "Advanced RNA-seq Pathway Analysis Tool"},
@@ -137,14 +163,34 @@ server = app.server
 
 @server.after_request
 def set_security_headers(response):
+    # Allow cross-origin access for Hugging Face Spaces
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    
     # Only list currently recognised Permissions-Policy features to silence
     # "Unrecognized feature" browser warnings caused by deprecated names.
     response.headers['Permissions-Policy'] = (
-        'camera=(), microphone=(), geolocation=(), payment=()'
+        'camera=(), microphone=(), geolocation=(), payment=(), '
+        'accelerometer=(), gyroscope=(), magnetometer=(), '
+        'usb=(), bluetooth=(), ambient-light-sensor=(), '
+        'document-domain=(), layout-animations=(), legacy-image-formats=(), '
+        'oversized-images=(), vr=(), wake-lock=()'
     )
     # Allow cross-origin storage so Edge Tracking Prevention doesn't block
     # the Dash session cookie when the app is embedded in an iframe.
     response.headers['Cross-Origin-Opener-Policy'] = 'same-origin-allow-popups'
+    response.headers['Cross-Origin-Embedder-Policy'] = 'credentialless'
+    
+    # Prevent external script injection
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https://plotly.com;"
+    )
     return response
 
 # Enhanced CSS with accessibility and modern styling
@@ -777,7 +823,7 @@ app.layout = dbc.Container([
     dcc.Download(id='download-enrich-csv'),
     
     # Progress tracking
-    dcc.Interval(id='progress-update-interval', interval=500, n_intervals=0),  # Update every 500ms
+    dcc.Interval(id='progress-update-interval', interval=1000, n_intervals=0, disabled=True),  # Disabled by default, update every second
     dcc.Store(id='progress-active-store', data={}),
 
 ], fluid=True)
@@ -1584,17 +1630,24 @@ def export_csv(n_clicks, enrichment_results):
 )
 def update_progress_indicator(n_intervals, progress_data):
     """Update progress indicator every 500ms"""
-    if not progress_data or progress_data.get('active_operation') != progress_data.get('last_operation'):
+    if not progress_data:
+        return html.Div()  # Return empty div instead of string
+    
+    active_op = progress_data.get('active_operation')
+    last_op = progress_data.get('last_operation')
+    
+    if not active_op or active_op != last_op:
         # No active operation or it changed
-        return ''
+        return html.Div()
     
     try:
-        operation = progress_data.get('active_operation', '')
-        if not operation:
-            return ''
-        
-        tracker = get_progress_tracker(operation)
+        tracker = get_progress_tracker(active_op)
+        if not tracker:
+            return html.Div()
+            
         summary = tracker.get_summary()
+        if not summary or summary.get('status') == 'completed':
+            return html.Div()
         
         # Generate progress HTML
         progress_html = html.Div([
