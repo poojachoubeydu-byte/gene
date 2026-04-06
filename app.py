@@ -347,7 +347,7 @@ app.layout = dbc.Container([
                         "Significance Level ",
                         html.I(className="fas fa-info-circle help-tooltip",
                                title="Adjusted p-value threshold (BH correction applied)")
-                    ], style={'fontWeight': '600', 'fontSize': '12px', 'marginBottom': '4px'}),
+                    ], htmlFor='padj-thresh-dd', style={'fontWeight': '600', 'fontSize': '12px', 'marginBottom': '4px'}),
                     dcc.Dropdown(id='padj-thresh-dd',
                                  options=[
                                      {'label': '0.001 (Stringent)', 'value': 0.001},
@@ -684,11 +684,11 @@ app.layout = dbc.Container([
                     ], xs=12, sm=12, md=12, lg=8, xl=8),
                     dbc.Col([
                         html.Div([
-                            html.Span("Gene Bio-Context Lookup", style={'fontWeight': '600', 'fontSize': '13px'}),
+                            html.Label("Gene Bio-Context Lookup", htmlFor='gene-search-input', style={'fontWeight': '600', 'fontSize': '13px'}),
                             html.Small("Fetch NCBI/UniProt metadata for selected gene symbols.",
                                        style={'color': '#666', 'fontSize': '11px'})
                         ], style={'marginBottom':'6px'}),
-                        dcc.Input(id='gene-search-input', type='text', placeholder='Enter gene symbol', style={'width': '100%', 'marginBottom': '6px'}),
+                        dcc.Input(id='gene-search-input', type='text', placeholder='Enter gene symbol', name='gene-search', style={'width': '100%', 'marginBottom': '6px'}),
                         dbc.Button('Lookup Gene Info', id='lookup-gene-btn', color='primary', size='sm', className='mb-2'),
                         html.Div(id='gene-info-panel', style={'fontSize': '12px', 'color': '#333', 'lineHeight': '1.5'})
                     ], xs=12, sm=12, md=12, lg=4, xl=4)
@@ -732,11 +732,11 @@ app.layout = dbc.Container([
             dbc.Form([
                 html.Div([
                     dbc.Label("Session Name", html_for="session-name-input"),
-                    dbc.Input(id='session-name-input', type='text', placeholder='e.g., PBMC_LPS_Analysis_v1')
+                    dbc.Input(id='session-name-input', type='text', placeholder='e.g., PBMC_LPS_Analysis_v1', name='session-name')
                 ], className='mb-3'),
                 html.Div([
                     dbc.Label("Description (optional)", html_for="session-desc-input"),
-                    dbc.Textarea(id='session-desc-input', placeholder='Add notes about this analysis...', rows=3)
+                    dbc.Textarea(id='session-desc-input', placeholder='Add notes about this analysis...', rows=3, name='session-description')
                 ], className='mb-3')
             ])
         ]),
