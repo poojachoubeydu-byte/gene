@@ -682,14 +682,14 @@ app.layout = dbc.Container([
         dbc.ModalHeader("Save Analysis Session"),
         dbc.ModalBody([
             dbc.Form([
-                dbc.FormGroup([
+                html.Div([
                     dbc.Label("Session Name", html_for="session-name-input"),
                     dbc.Input(id='session-name-input', type='text', placeholder='e.g., PBMC_LPS_Analysis_v1')
-                ]),
-                dbc.FormGroup([
+                ], className='mb-3'),
+                html.Div([
                     dbc.Label("Description (optional)", html_for="session-desc-input"),
                     dbc.Textarea(id='session-desc-input', placeholder='Add notes about this analysis...', rows=3)
-                ])
+                ], className='mb-3')
             ])
         ]),
         dbc.ModalFooter([
