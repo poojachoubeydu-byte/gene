@@ -28,6 +28,7 @@ from modules.session_manager import get_session_manager
 from modules.advanced_export import get_exporter
 from modules.data_validator import DataValidator, validate_deg_data
 from modules.progress_tracker import get_progress_tracker, create_upload_progress_tracker
+from modules.batch_analysis import get_batch_analyzer
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
@@ -263,12 +264,19 @@ app.layout = dbc.Container([
                 # Demo Button
                 html.Div([
                     html.Label("Quick Start", style={'display': 'block', 'marginBottom': '4px'}),
-                    dbc.Button([
-                        html.I(className="fas fa-play", style={'marginRight':'6px'}),
-                        "Load Demo Data"
-                    ], id='load-demo-btn', color="outline-primary",
-                       size="sm", style={'height': '44px', 'fontSize': '12px'})
-                ], style={'flexShrink': '1', 'minWidth': '120px'}),
+                    html.Div([
+                        dbc.Button([
+                            html.I(className="fas fa-play", style={'marginRight':'6px'}),
+                            "Load Demo Data"
+                        ], id='load-demo-btn', color="outline-primary",
+                           size="sm", style={'height': '44px', 'fontSize': '12px', 'marginRight': '4px'}),
+                        dbc.Button([
+                            html.I(className="fas fa-layer-group", style={'marginRight':'6px'}),
+                            "Batch Mode"
+                        ], id='toggle-batch-mode-btn', color="outline-secondary",
+                           size="sm", style={'height': '44px', 'fontSize': '12px'})
+                    ], style={'display':'flex','gap':'4px'})
+                ], style={'flexShrink': '1', 'minWidth': '200px'}),
 
                 # Statistical Parameters
                 html.Div([
@@ -394,6 +402,53 @@ app.layout = dbc.Container([
                 ], style={'display':'flex','gap':'16px'})
             ], color="success", style={'fontSize': '12px', 'padding': '12px 16px'})
         ], id='help-panel', is_open=True)
+    ], width=12)]),
+
+    # ── BATCH MODE SECTION ──────────────────────────────
+    dbc.Row([dbc.Col([
+        dbc.Collapse([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("📦 Batch Processing Mode", style={'marginBottom': '12px', 'color': '#1a237e'}),
+                    html.P("Upload and analyze multiple DEG files simultaneously. Compare gene signatures across samples.",
+                          style={'fontSize': '12px', 'marginBottom': '12px', 'color': '#666'}),
+                    html.Div([
+                        html.Div([
+                            html.Label("Upload Multiple Files", style={'fontWeight': '600', 'fontSize': '12px', 'marginBottom': '6px', 'display': 'block'}),
+                            dcc.Upload(
+                                id='batch-file-upload',
+                                children=html.Div([
+                                    html.I(className="fas fa-folder-open", style={'fontSize': '20px', 'color': '#666', 'display': 'block', 'marginBottom': '6px'}),
+                                    'Drag & Drop or Select Multiple CSV Files'
+                                ]),
+                                style={
+                                    'width': '100%',
+                                    'height': '80px',
+                                    'lineHeight': '80px',
+                                    'borderWidth': '2px',
+                                    'borderStyle': 'dashed',
+                                    'borderRadius': '6px',
+                                    'textAlign': 'center',
+                                    'borderColor': '#adb5bd',
+                                    'fontSize': '12px',
+                                    'cursor': 'pointer',
+                                    'backgroundColor': '#f8f9fa'
+                                },
+                                max_size=50*1024*1024,  # 50MB total for batch
+                                multiple=True
+                            ),
+                        ], style={'flexGrow': '1', 'marginRight': '12px'}),
+                        html.Div([
+                            dbc.Button([
+                                html.I(className="fas fa-cog", style={'marginRight': '6px'}),
+                                "Process Batch"
+                            ], id='process-batch-btn', color="primary", className='mt-4', style={'width': '100%'}),
+                            html.Div(id='batch-process-status', style={'marginTop': '8px', 'fontSize': '11px'})
+                        ], style={'min Width': '150px'})
+                    ], style={'display': 'flex', 'gap': '12px'})
+                ])
+            ], className="shadow-sm")
+        ], id='batch-mode-section', is_open=False)
     ], width=12)]),
 
     # ── MAIN ANALYSIS PANELS ────────────────────────────
@@ -688,6 +743,28 @@ app.layout = dbc.Container([
             dbc.Button("Close", id="export-modal-close", className="me-2"),
         ], style={'justifyContent': 'flex-start'})
     ], id="export-options-modal", is_open=False),
+    
+    # Batch Comparison Results Modal
+    dbc.Modal([
+        dbc.ModalHeader("Batch Analysis Results"),
+        dbc.ModalBody([
+            dbc.Tabs([
+                dbc.Tab([
+                    html.Div(id='batch-comparison-table', style={'marginTop': '12px'})
+                ], label="Comparison Summary"),
+                dbc.Tab([
+                    html.Div(id='batch-overlap-analysis', style={'marginTop': '12px'})
+                ], label="Gene Overlaps"),
+                dbc.Tab([
+                    html.Div(id='batch-errors-panel', style={'marginTop': '12px'})
+                ], label="Processing Status")
+            ])
+        ], style={'maxHeight': '70vh', 'overflowY': 'auto'}),
+        dbc.ModalFooter([
+            dbc.Button("Export Results", id="batch-export-btn", color="success", className="me-2"),
+            dbc.Button("Close", id="batch-results-close")
+        ])
+    ], id="batch-results-modal", is_open=False, size="xl"),
     
     # Download components
     dcc.Download(id='download-excel'),
@@ -1537,6 +1614,139 @@ def update_progress_indicator(n_intervals, progress_data):
     except Exception as e:
         logger.debug(f"Progress update error: {str(e)}")
         return ''
+
+
+# ── CALLBACK 20: Batch Mode - Toggle Section ───────────────────────────────
+
+@app.callback(
+    Output("batch-mode-section", "is_open"),
+    Input("toggle-batch-mode-btn", "n_clicks"),
+    State("batch-mode-section", "is_open"),
+    prevent_initial_call=True
+)
+def toggle_batch_mode(n_clicks, is_open):
+    if not n_clicks:
+        return is_open
+    return not is_open
+
+
+# ── CALLBACK 21: Batch Mode - Process Files ─────────────────────────────────
+
+@app.callback(
+    Output("batch-results-modal", "is_open"),
+    Output("batch-comparison-table", "children"),
+    Output("batch-overlap-analysis", "children"),
+    Output("batch-errors-panel", "children"),
+    Output("batch-process-status", "children"),
+    Input("process-batch-btn", "n_clicks"),
+    State("batch-file-upload", "contents"),
+    State("batch-file-upload", "filename"),
+    State("lfc-thresh-slider", "value"),
+    State("padj-thresh-dd", "value"),
+    prevent_initial_call=True
+)
+def process_batch_files(n_clicks, contents, filenames, lfc_thresh, padj_thresh):
+    if not n_clicks or not contents:
+        return False, '', '', '', 'No files uploaded'
+    
+    try:
+        import hashlib
+        job_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:8]
+        batch_analyzer = get_batch_analyzer()
+        
+        # Parse uploaded files
+        files_metadata = []
+        for content, filename in zip(contents, filenames or []):
+            try:
+                content_type, content_string = content.split(',')
+                decoded = base64.b64decode(content_string)
+                df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+                files_metadata.append({'filename': filename, 'data': df})
+            except Exception as e:
+                logger.error(f"Error parsing {filename}: {str(e)}")
+        
+        if not files_metadata:
+            return False, '', '', 'No valid files parsed', dbc.Alert('Error: No valid CSV files found', color='danger')
+        
+        # Create batch job
+        job = batch_analyzer.create_batch_job(job_id, files_metadata)
+        
+        # Process batch
+        params = {
+            'log2_fold_change': lfc_thresh,
+            'adjusted_p_value': padj_thresh
+        }
+        job_status = batch_analyzer.process_files(job_id, validate_deg_data, params)
+        
+        # Get comparison analysis
+        comparison_data = batch_analyzer.get_comparison_analysis(job_id)
+        
+        # Build result displays
+        if comparison_data.get('error'):
+            return False, dbc.Alert(comparison_data['error'], color='danger'), '', '', dbc.Alert('Processing completed with errors', color='warning')
+        
+        # Comparison table
+        comparison_df = pd.DataFrame(comparison_data.get('comparison_table', []))
+        comparison_table = dbc.Table.from_dataframe(comparison_df, striped=True, bordered=True, hover=True)
+        
+        # Overlap analysis
+        overlaps = comparison_data.get('overlap_analysis', {})
+        overlap_elements = []
+        for pair, overlap_data in overlaps.items():
+            overlap_elements.append(
+                html.Div([
+                    html.H6(f"⊆ {pair}", style={'marginBottom': '6px'}),
+                    html.P(f"Intersection: {overlap_data['intersection']} genes | "
+                           f"Jaccard Similarity: {overlap_data['jaccard']:.2%}",
+                          style={'fontSize': '12px', 'marginBottom': '6px'}),
+                    html.Small(f"Sample genes: {', '.join(overlap_data['genes'][:5])}...")
+                ], style={'padding': '8px', 'borderLeft': '3px solid #1565c0', 'marginBottom': '8px'})
+            )
+        
+        # Error summary
+        errors_summary = []
+        for filename, result in job.results.items():
+            if result.get('status') in ['failed', 'error']:
+                errors_summary.append(
+                    dbc.Alert([
+                        html.Strong(filename),
+                        html.Br(),
+                        html.Small(result.get('error', 'Unknown error'))
+                    ], color='danger')
+                )
+            elif result.get('warnings'):
+                errors_summary.append(
+                    dbc.Alert([
+                        html.Strong(filename),
+                        html.Br(),
+                        html.Small('; '.join(result['warnings']))
+                    ], color='warning')
+                )
+        
+        status_msg = dbc.Alert([
+            html.I(className="fas fa-check-circle", style={'marginRight': '8px'}),
+            f"✅ Batch processed: {job_status['completed_files']}/{job_status['files_count']} files completed"
+        ], color='success')
+        
+        return True, comparison_table, html.Div(overlap_elements) if overlap_elements else html.P('No significant overlaps'), html.Div(errors_summary) if errors_summary else html.P('All files processed successfully'), status_msg
+    
+    except Exception as e:
+        logger.error(f"Batch processing error: {str(e)}")
+        return False, '', '', '', dbc.Alert(f'Error: {str(e)[:100]}', color='danger')
+
+
+# ── CALLBACK 22: Batch Mode - Close Modal ──────────────────────────────────
+
+@app.callback(
+    Output("batch-results-modal", "is_open"),
+    Input("batch-results-close", "n_clicks"),
+    State("batch-results-modal", "is_open"),
+    prevent_initial_call=True
+)
+def close_batch_modal(n_clicks, is_open):
+    if n_clicks:
+        return False
+    return is_open
 
 
 if __name__ == '__main__':
