@@ -26,6 +26,7 @@ from modules.bio_context import fetch_gene_info
 from modules.export import generate_pdf_report, compute_data_integrity_score
 from modules.session_manager import get_session_manager
 from modules.advanced_export import get_exporter
+from modules.data_validator import DataValidator, validate_deg_data
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
@@ -112,86 +113,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── UTILITY FUNCTIONS ───────────────────────────────────────────────────────
-
-def validate_deg_data(df):
-    """
-    Comprehensive validation of DEG data with detailed error reporting
-    """
-    errors = []
-    warnings = []
-
-    # Check for required columns (case-insensitive matching)
-    col_lower_map = {c.lower(): c for c in df.columns}
-    missing_cols = []
-    for col in REQUIRED_COLUMNS:
-        if col not in df.columns:
-            # Try common alternatives (case-insensitive)
-            alternatives = {
-                'gene_symbol': ['symbol', 'gene', 'gene_symbol', 'id', 'name', 'gene_name', 'genename', 'gene_id'],
-                'log2_fold_change': ['log2foldchange', 'log2fc', 'logfc', 'lfc', 'log2_fold_change', 'fold_change', 'foldchange', 'log2_fc'],
-                'adjusted_p_value': ['padj', 'fdr', 'qvalue', 'adj_p', 'adjusted_p_value', 'adj.p.val', 'adj_pval', 'p_adj', 'p.adj']
-            }
-            found_alt = None
-            for alt in alternatives.get(col, []):
-                actual = col_lower_map.get(alt.lower())
-                if actual is not None:
-                    found_alt = actual
-                    break
-            if found_alt:
-                df = df.rename(columns={found_alt: col})
-                col_lower_map = {c.lower(): c for c in df.columns}
-            else:
-                missing_cols.append(col)
-
-    if missing_cols:
-        errors.append(f"Missing required columns: {', '.join(missing_cols)}")
-
-    if errors:
-        return None, errors, warnings
-
-    # Data type validation
-    try:
-        df['log2_fold_change'] = pd.to_numeric(df['log2_fold_change'], errors='coerce')
-        df['adjusted_p_value'] = pd.to_numeric(df['adjusted_p_value'], errors='coerce')
-    except Exception as e:
-        errors.append(f"Data type conversion failed: {str(e)}")
-        return None, errors, warnings
-
-    # Remove rows with missing values
-    original_len = len(df)
-    df = df.dropna(subset=['gene_symbol', 'log2_fold_change', 'adjusted_p_value'])
-    if len(df) < original_len:
-        warnings.append(f"Removed {original_len - len(df)} rows with missing values")
-
-    # Validate data ranges — clip values slightly above 1.0 (floating-point rounding from some tools)
-    df['adjusted_p_value'] = df['adjusted_p_value'].clip(upper=1.0)
-    if (df['adjusted_p_value'] < 0).any():
-        errors.append("Adjusted p-values contain negative values, which is invalid")
-
-    if df['log2_fold_change'].abs().max() > 20:
-        warnings.append("Extremely large fold changes detected (>20). Please verify data scaling.")
-
-    # Check for duplicates
-    dup_genes = df['gene_symbol'].duplicated().sum()
-    if dup_genes > 0:
-        warnings.append(f"Found {dup_genes} duplicate gene symbols. Keeping first occurrence.")
-        df = df.drop_duplicates(subset=['gene_symbol'], keep='first')
-
-    # Check data size
-    if len(df) < MIN_GENES:
-        errors.append(f"Dataset too small: {len(df)} genes (minimum {MIN_GENES} required for any meaningful plot)")
-    elif len(df) < 50:
-        warnings.append(f"Small dataset: {len(df)} genes. Some analyses may be limited.")
-
-    if len(df) > MAX_GENES:
-        warnings.append(f"Large dataset: {len(df)} genes. Performance may be affected.")
-
-    # Statistical quality checks
-    n_sig = ((df['log2_fold_change'].abs() > 1) & (df['adjusted_p_value'] < 0.05)).sum()
-    if n_sig < 10:
-        warnings.append("Very few significantly differentially expressed genes detected. Consider relaxing thresholds.")
-
-    return df, errors, warnings
 
 def create_session_id():
     """Generate unique session identifier"""
@@ -795,16 +716,25 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
             temp_df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
 
             # Use enhanced validation
-            df, errors, warnings = validate_deg_data(temp_df)
+            df, errors, warnings, html_summary = validate_deg_data(temp_df)
 
             if errors:
-                msg = "Validation failed: " + "; ".join(errors)
+                msg = html.Div([
+                    html.Div(html.Div(dangerously_allow_html=True, innerHTML=html_summary),
+                            style={'marginBottom': '12px'})
+                ], style={'fontSize': '12px'})
                 empty_fig = create_volcano_plot(pd.DataFrame(columns=['log2_fold_change', 'adjusted_p_value', 'gene_symbol']),
                                                 'log2_fold_change', 'adjusted_p_value', 'gene_symbol')
                 return None, empty_fig, dash.no_update, msg, 'danger', True, True
 
-            if warnings:
-                logger.warning("Data validation warnings: " + "; ".join(warnings))
+            if warnings or html_summary:
+                logger.warning(f"Data validation: {len(warnings)} warnings")
+                # Show validation details as info alert
+                msg = html.Div([
+                    html.Div(html.Div(dangerously_allow_html=True, innerHTML=html_summary),
+                            style={'marginBottom': '8px'})
+                ], style={'fontSize': '12px'})
+                # Don't treat warnings as blocking, just inform the user
 
             # Rename columns to match expected format
             df = df.rename(columns={
