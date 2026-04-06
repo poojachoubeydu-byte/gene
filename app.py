@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, Input, Output, State, dash_table, ctx, callback
+from dash import dcc, html, Input, Output, State, dash_table, ctx, callback, ALL
 import dash_bootstrap_components as dbc
 import pandas as pd
 import numpy as np
@@ -24,6 +24,7 @@ from modules.analysis import (
 )
 from modules.bio_context import fetch_gene_info
 from modules.export import generate_pdf_report, compute_data_integrity_score
+from modules.session_manager import get_session_manager
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
@@ -397,6 +398,23 @@ app.layout = dbc.Container([
                     ], style={'display':'flex','gap':'4px'})
                 ], style={'flexShrink': '1', 'minWidth': '120px'}),
 
+                # Session Management Buttons
+                html.Div([
+                    html.Label("Session", style={'display': 'block', 'marginBottom': '4px'}),
+                    html.Div([
+                        dbc.Button([
+                            html.I(className="fas fa-save", style={'marginRight':'4px'}),
+                            "Save"
+                        ], id='save-session-btn', color="outline-info", size="sm",
+                           style={'height': '32px', 'fontSize': '11px', 'marginRight':'6px'}),
+                        dbc.Button([
+                            html.I(className="fas fa-folder-open", style={'marginRight':'4px'}),
+                            "Load"
+                        ], id='load-session-btn', color="outline-info", size="sm",
+                           style={'height': '32px', 'fontSize': '11px'})
+                    ], style={'display':'flex','gap':'4px'})
+                ], style={'flexShrink': '1', 'minWidth': '120px'}),
+
             ], style={
                 'display': 'flex',
                 'gap': '16px',
@@ -660,6 +678,43 @@ app.layout = dbc.Container([
     dcc.Store(id='integrity-store', data={}),
     dcc.Store(id='ora-params-store', data={}),
     dcc.Download(id='download-results'),
+    
+    # ── SESSION MANAGEMENT COMPONENTS ────────────────────
+    dcc.Store(id='persistent-session-store', storage_type='local'),
+    dcc.Download(id='download-session'),
+    html.Div(id='session-modal-container'),
+    
+    # Save Session Modal
+    dbc.Modal([
+        dbc.ModalHeader("Save Analysis Session"),
+        dbc.ModalBody([
+            dbc.Form([
+                dbc.FormGroup([
+                    dbc.Label("Session Name", html_for="session-name-input"),
+                    dbc.Input(id='session-name-input', type='text', placeholder='e.g., PBMC_LPS_Analysis_v1')
+                ]),
+                dbc.FormGroup([
+                    dbc.Label("Description (optional)", html_for="session-desc-input"),
+                    dbc.Textarea(id='session-desc-input', placeholder='Add notes about this analysis...', rows=3)
+                ])
+            ])
+        ]),
+        dbc.ModalFooter([
+            dbc.Button("Cancel", id="save-session-cancel", className="me-2"),
+            dbc.Button("Save Session", id="save-session-confirm", color="primary")
+        ])
+    ], id="save-session-modal", is_open=False),
+    
+    # Load Session Modal
+    dbc.Modal([
+        dbc.ModalHeader("Load Analysis Session"),
+        dbc.ModalBody([
+            html.Div(id='sessions-list-container')
+        ]),
+        dbc.ModalFooter([
+            dbc.Button("Close", id="load-session-cancel", className="me-2")
+        ])
+    ], id="load-session-modal", is_open=False, size="lg"),
 
 ], fluid=True)
 
@@ -1149,6 +1204,160 @@ def lookup_gene_metadata(n_clicks, gene_symbol):
         details.append(html.P(f"Disease associations: {', '.join(info.get('disease_associations', []))}", style={'margin': '0 0 4px 0'}))
 
     return html.Div(details, style={'fontSize': '12px', 'lineHeight': '1.4'})
+
+
+# ── CALLBACK 11: Session Management - Save Session Modal ──────────────────
+
+@app.callback(
+    Output("save-session-modal", "is_open"),
+    Input("save-session-btn", "n_clicks"),
+    Input("save-session-cancel", "n_clicks"),
+    Input("save-session-confirm", "n_clicks"),
+    State("save-session-modal", "is_open"),
+    prevent_initial_call=True
+)
+def toggle_save_session_modal(save_clicks, cancel_clicks, confirm_clicks, is_open):
+    if not ctx.triggered:
+        return is_open
+    
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    
+    if trigger_id == "save-session-confirm":
+        return False
+    return not is_open if trigger_id == "save-session-btn" else is_open
+
+
+# ── CALLBACK 12: Session Management - Perform Save ──────────────────────────
+
+@app.callback(
+    Output('main-alert', 'children'),
+    Output('main-alert', 'color'),
+    Output('main-alert', 'is_open'),
+    Output('session-name-input', 'value'),
+    Output('session-desc-input', 'value'),
+    Input("save-session-confirm", "n_clicks"),
+    State('session-name-input', 'value'),
+    State('session-desc-input', 'value'),
+    State('dge-data-store', 'data'),
+    State('gsea-results-store', 'data'),
+    State('volcano-filter-genes', 'data'),
+    State('lfc-thresh-slider', 'value'),
+    State('padj-thresh-dd', 'value'),
+    prevent_initial_call=True
+)
+def save_session(n_clicks, session_name, description, dge_data, gsea_results, selected_genes, lfc_thresh, padj_thresh):
+    if not n_clicks or not session_name or session_name.strip() == '':
+        return 'Session name is required', 'danger', True, session_name or '', description or ''
+    
+    try:
+        session_mgr = get_session_manager()
+        
+        # Prepare session data
+        session_data = {
+            'data': pd.DataFrame(dge_data) if dge_data else pd.DataFrame(),
+            'parameters': {
+                'log2_fold_change': lfc_thresh,
+                'adjusted_p_value': padj_thresh
+            },
+            'enrichment_results': pd.DataFrame(gsea_results) if isinstance(gsea_results, list) else {},
+            'selected_genes': selected_genes or [],
+            'metadata': {
+                'description': description or '',
+                'data_rows': len(dge_data) if dge_data else 0,
+                'selected_genes_count': len(selected_genes) if selected_genes else 0
+            }
+        }
+        
+        result = session_mgr.save_session(session_name.strip(), session_data)
+        
+        if result['success']:
+            return result['message'], 'success', True, '', ''
+        else:
+            return result['message'], 'danger', True, session_name or '', description or ''
+    
+    except Exception as e:
+        logger.error(f"Error saving session: {str(e)}")
+        return f'Error saving session: {str(e)}', 'danger', True, session_name or '', description or ''
+
+
+# ── CALLBACK 13: Session Management - Load Session Modal ──────────────────
+
+@app.callback(
+    Output("load-session-modal", "is_open"),
+    Output('sessions-list-container', 'children'),
+    Input("load-session-btn", "n_clicks"),
+    Input("load-session-cancel", "n_clicks"),
+    State("load-session-modal", "is_open"),
+    prevent_initial_call=True
+)
+def toggle_load_session_modal(load_clicks, cancel_clicks, is_open):
+    if not ctx.triggered:
+        return is_open, []
+    
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    
+    if trigger_id == "load-session-btn":
+        # Build sessions list
+        session_mgr = get_session_manager()
+        sessions = session_mgr.list_sessions()
+        
+        if not sessions:
+            sessions_ui = dbc.Alert("No saved sessions found", color="info")
+        else:
+            sessions_ui = dbc.ListGroup([
+                dbc.ListGroupItem([
+                    html.Div([
+                        html.H6(s['name'], style={'marginBottom': '4px', 'fontWeight': '600'}),
+                        html.Small(f"Saved: {s['timestamp']} | Genes: {s['gene_count']}", style={'color': '#666'}),
+                        html.Small(s['description']) if s['description'] else None,
+                        dbc.Button('Load', id={'type': 'load-session-btn-item', 'index': s['name']}, 
+                                  color='primary', size='sm', className='mt-2')
+                    ])
+                ]) for s in sessions
+            ])
+        
+        return True, sessions_ui
+    
+    return not is_open if trigger_id == "load-session-btn" else is_open, []
+
+
+# ── CALLBACK 14: Session Management - Perform Load ──────────────────────────
+
+@app.callback(
+    Output('dge-data-store', 'data'),
+    Output('lfc-thresh-slider', 'value'),
+    Output('padj-thresh-dd', 'value'),
+    Output('volcano-filter-genes', 'data'),
+    Output('main-alert', 'children'),
+    Output('main-alert', 'color'),
+    Output('main-alert', 'is_open'),
+    Input({'type': 'load-session-btn-item', 'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True
+)
+def load_selected_session(n_clicks_list):
+    if not ctx.triggered or not any(n_clicks_list or []):
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, '', 'info', False
+    
+    try:
+        session_name = ctx.triggered[0]["prop_id"].split('"index":"')[1].split('"')[0]
+        session_mgr = get_session_manager()
+        
+        session_data, status = session_mgr.load_session(session_name)
+        
+        if not status['success']:
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, status['message'], 'danger', True
+        
+        # Extract data
+        dge_data = session_data['data'].to_dict('records') if not session_data['data'].empty else []
+        params = session_data.get('parameters', {})
+        selected_genes = session_data.get('selected_genes', [])
+        
+        msg = f"Session '{session_name}' loaded successfully ({len(selected_genes)} selected genes)"
+        return dge_data, params.get('log2_fold_change', 1.0), params.get('adjusted_p_value', 0.05), selected_genes, msg, 'success', True
+    
+    except Exception as e:
+        logger.error(f"Error loading session: {str(e)}")
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'Error loading session: {str(e)}', 'danger', True
 
 
 if __name__ == '__main__':
