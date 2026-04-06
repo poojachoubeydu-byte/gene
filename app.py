@@ -27,6 +27,7 @@ from modules.export import generate_pdf_report, compute_data_integrity_score
 from modules.session_manager import get_session_manager
 from modules.advanced_export import get_exporter
 from modules.data_validator import DataValidator, validate_deg_data
+from modules.progress_tracker import get_progress_tracker, create_upload_progress_tracker
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
@@ -206,6 +207,21 @@ app.layout = dbc.Container([
     # ── DATA QUALITY INDICATORS ─────────────────────────
     dbc.Row([dbc.Col([
         html.Div(id='data-quality-panel', style={'marginBottom':'12px'})
+    ], width=12)]),
+
+    # ── PROGRESS INDICATOR ──────────────────────────────
+    dbc.Row([dbc.Col([
+        dcc.Loading(
+            type='default',
+            color='#1565c0',
+            children=html.Div(id='progress-indicator-panel', style={
+                'marginBottom': '12px',
+                'padding': '8px',
+                'backgroundColor': '#f5f5f5',
+                'borderRadius': '4px',
+                'minHeight': '0px'
+            })
+        )
     ], width=12)]),
 
     # ── ENHANCED CONTROLS ROW ───────────────────────────
@@ -677,6 +693,10 @@ app.layout = dbc.Container([
     dcc.Download(id='download-excel'),
     dcc.Download(id='download-json'),
     dcc.Download(id='download-enrich-csv'),
+    
+    # Progress tracking
+    dcc.Interval(id='progress-update-interval', interval=500, n_intervals=0),  # Update every 500ms
+    dcc.Store(id='progress-active-store', data={}),
 
 ], fluid=True)
 
@@ -1459,6 +1479,64 @@ def export_csv(n_clicks, enrichment_results):
     except Exception as e:
         logger.error(f"CSV export error: {str(e)}")
         return dash.no_update
+
+
+# ── CALLBACK 19: Progress Indicator Update ──────────────────────────────────
+
+@app.callback(
+    Output('progress-indicator-panel', 'children'),
+    Input('progress-update-interval', 'n_intervals'),
+    State('progress-active-store', 'data'),
+    prevent_initial_call=True
+)
+def update_progress_indicator(n_intervals, progress_data):
+    """Update progress indicator every 500ms"""
+    if not progress_data or progress_data.get('active_operation') != progress_data.get('last_operation'):
+        # No active operation or it changed
+        return ''
+    
+    try:
+        operation = progress_data.get('active_operation', '')
+        if not operation:
+            return ''
+        
+        tracker = get_progress_tracker(operation)
+        summary = tracker.get_summary()
+        
+        # Generate progress HTML
+        progress_html = html.Div([
+            html.Div([
+                html.Span(f"⏳ {operation}", style={'fontWeight': '600', 'fontSize': '12px'}),
+                html.Span(f"{summary['progress_percentage']}%", 
+                         style={'float': 'right', 'fontSize': '11px', 'color': '#666'})
+            ], style={'marginBottom': '6px', 'display': 'flex', 'justifyContent': 'space-between'}),
+            dbc.Progress(value=summary['progress_percentage'], style={'height': '6px', 'marginBottom': '6px'}),
+            html.Div([
+                html.Span(
+                    f"• {step['name']}" + 
+                    (" ✓" if step['status'] == 'completed' else 
+                     " ⊙" if step['status'] == 'running' else 
+                     " ⊗" if step['status'] == 'error' else " ◯"),
+                    style={
+                        'fontSize': '10px',
+                        'color': {
+                            'completed': '#4CAF50',
+                            'running': '#FF9800',
+                            'error': '#f44336',
+                            'pending': '#999'
+                        }.get(step['status'], '#999'),
+                        'display': 'block',
+                        'marginBottom': '2px'
+                    }
+                ) for step in summary['steps'][-3:]  # Show last 3 steps
+            ], style={'fontSize': '10px'})
+        ], style={'padding': '8px'})
+        
+        return progress_html
+    
+    except Exception as e:
+        logger.debug(f"Progress update error: {str(e)}")
+        return ''
 
 
 if __name__ == '__main__':
