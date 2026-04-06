@@ -11,3 +11,5 @@ scipy
 reportlab
 diskcache
 scikit-learn
+openpyxl
+kaleido

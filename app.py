@@ -25,6 +25,7 @@ from modules.analysis import (
 from modules.bio_context import fetch_gene_info
 from modules.export import generate_pdf_report, compute_data_integrity_score
 from modules.session_manager import get_session_manager
+from modules.advanced_export import get_exporter
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
@@ -394,7 +395,7 @@ app.layout = dbc.Container([
                             html.I(className="fas fa-download", style={'marginRight':'4px'}),
                             "Export"
                         ], id='export-btn', color="outline-success", size="sm",
-                           className="export-btn", style={'height': '32px', 'fontSize': '11px'})
+                           className="export-btn", style={'height': '32px', 'fontSize': '11px', 'cursor': 'pointer'})
                     ], style={'display':'flex','gap':'4px'})
                 ], style={'flexShrink': '1', 'minWidth': '120px'}),
 
@@ -715,6 +716,46 @@ app.layout = dbc.Container([
             dbc.Button("Close", id="load-session-cancel", className="me-2")
         ])
     ], id="load-session-modal", is_open=False, size="lg"),
+    
+    # Export Options Modal
+    dbc.Modal([
+        dbc.ModalHeader("Export Analysis Results"),
+        dbc.ModalBody([
+            html.Div([
+                html.H6("Choose Export Format:", style={'marginBottom': '12px'}),
+                dbc.ButtonGroup([
+                    dbc.Button(
+                        [html.I(className="fas fa-file-excel", style={'marginRight':'6px'}), "Excel"],
+                        id='export-excel-btn', color='info', outline=True
+                    ),
+                    dbc.Button(
+                        [html.I(className="fas fa-code", style={'marginRight':'6px'}), "JSON"],
+                        id='export-json-btn', color='info', outline=True
+                    ),
+                    dbc.Button(
+                        [html.I(className="fas fa-file-csv", style={'marginRight':'6px'}), "CSV"],
+                        id='export-csv-btn', color='info', outline=True
+                    ),
+                ], style={'width': '100%', 'marginBottom': '12px'}, vertical=False),
+                html.Hr(),
+                html.P("Excel: Multi-sheet workbook with data, enrichment, summary, parameters", 
+                       style={'fontSize': '11px', 'color': '#666', 'marginBottom': '4px'}),
+                html.P("JSON: Complete analysis export with metadata for programmatic access", 
+                       style={'fontSize': '11px', 'color': '#666', 'marginBottom': '4px'}),
+                html.P("CSV: Separate files for gene data and enrichment results", 
+                       style={'fontSize': '11px', 'color': '#666', 'marginBottom': '12px'}),
+                html.Div(id='export-status-message', style={'fontSize': '11px', 'marginTop': '12px'})
+            ])
+        ]),
+        dbc.ModalFooter([
+            dbc.Button("Close", id="export-modal-close", className="me-2"),
+        ], style={'justifyContent': 'flex-start'})
+    ], id="export-options-modal", is_open=False),
+    
+    # Download components
+    dcc.Download(id='download-excel'),
+    dcc.Download(id='download-json'),
+    dcc.Download(id='download-enrich-csv'),
 
 ], fluid=True)
 
@@ -1358,6 +1399,136 @@ def load_selected_session(n_clicks_list):
     except Exception as e:
         logger.error(f"Error loading session: {str(e)}")
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'Error loading session: {str(e)}', 'danger', True
+
+
+# ── CALLBACK 15: Export - Show Export Options Modal ────────────────────────
+
+@app.callback(
+    Output("export-options-modal", "is_open"),
+    Input("export-btn", "n_clicks"),
+    Input("export-modal-close", "n_clicks"),
+    State("export-options-modal", "is_open"),
+    prevent_initial_call=True
+)
+def toggle_export_modal(export_clicks, close_clicks, is_open):
+    if not ctx.triggered:
+        return is_open
+    
+    return not is_open
+
+
+# ── CALLBACK 16: Export - Excel Format ──────────────────────────────────────
+
+@app.callback(
+    Output('download-excel', 'data'),
+    Output('export-status-message', 'children'),
+    Input('export-excel-btn', 'n_clicks'),
+    State('dge-data-store', 'data'),
+    State('gsea-results-store', 'data'),
+    State('volcano-filter-genes', 'data'),
+    State('lfc-thresh-slider', 'value'),
+    State('padj-thresh-dd', 'value'),
+    State('integrity-store', 'data'),
+    prevent_initial_call=True
+)
+def export_excel(n_clicks, gene_data, enrichment_results, selected_genes, lfc_thresh, padj_thresh, integrity_data):
+    if not n_clicks:
+        return dash.no_update, ''
+    
+    try:
+        exporter = get_exporter()
+        gene_df = pd.DataFrame(gene_data) if gene_data else pd.DataFrame()
+        
+        excel_bytes = exporter.export_to_excel(
+            gene_df,
+            pd.DataFrame(enrichment_results) if isinstance(enrichment_results, list) else enrichment_results,
+            selected_genes or [],
+            {'log2_fold_change': lfc_thresh, 'adjusted_p_value': padj_thresh},
+            integrity_data or {}
+        )
+        
+        filename = f'gene_analysis_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        status_msg = dbc.Alert(
+            [html.I(className="fas fa-check-circle", style={'marginRight': '8px'}),
+             f"✅ Excel exported successfully as {filename}"],
+            color="success", dismissable=True
+        )
+        return dcc.send_bytes(excel_bytes, filename), status_msg
+    
+    except ImportError as e:
+        status_msg = dbc.Alert(
+            [html.I(className="fas fa-exclamation-triangle", style={'marginRight': '8px'}),
+             "Note: Excel export requires openpyxl. Try JSON or CSV format instead."],
+            color="warning", dismissable=True
+        )
+        return dash.no_update, status_msg
+    except Exception as e:
+        logger.error(f"Export error: {str(e)}")
+        status_msg = dbc.Alert(
+            f"Export failed: {str(e)[:100]}",
+            color="danger", dismissable=True
+        )
+        return dash.no_update, status_msg
+
+
+# ── CALLBACK 17: Export - JSON Format ───────────────────────────────────────
+
+@app.callback(
+    Output('download-json', 'data'),
+    Input('export-json-btn', 'n_clicks'),
+    State('dge-data-store', 'data'),
+    State('gsea-results-store', 'data'),
+    State('volcano-filter-genes', 'data'),
+    State('lfc-thresh-slider', 'value'),
+    State('padj-thresh-dd', 'value'),
+    State('integrity-store', 'data'),
+    prevent_initial_call=True
+)
+def export_json(n_clicks, gene_data, enrichment_results, selected_genes, lfc_thresh, padj_thresh, integrity_data):
+    if not n_clicks:
+        return dash.no_update
+    
+    try:
+        exporter = get_exporter()
+        gene_df = pd.DataFrame(gene_data) if gene_data else pd.DataFrame()
+        
+        json_bytes = exporter.export_to_json(
+            gene_df,
+            pd.DataFrame(enrichment_results) if isinstance(enrichment_results, list) else enrichment_results,
+            selected_genes or [],
+            {'log2_fold_change': lfc_thresh, 'adjusted_p_value': padj_thresh},
+            integrity_data or {}
+        )
+        
+        filename = f'gene_analysis_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+        return dcc.send_bytes(json_bytes, filename)
+    
+    except Exception as e:
+        logger.error(f"JSON export error: {str(e)}")
+        return dash.no_update
+
+
+# ── CALLBACK 18: Export - CSV Format ────────────────────────────────────────
+
+@app.callback(
+    Output('download-enrich-csv', 'data'),
+    Input('export-csv-btn', 'n_clicks'),
+    State('gsea-results-store', 'data'),
+    prevent_initial_call=True
+)
+def export_csv(n_clicks, enrichment_results):
+    if not n_clicks:
+        return dash.no_update
+    
+    try:
+        exporter = get_exporter()
+        csv_bytes = exporter.export_enrichment_csv(enrichment_results)
+        filename = f'enrichment_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        return dcc.send_bytes(csv_bytes, filename)
+    
+    except Exception as e:
+        logger.error(f"CSV export error: {str(e)}")
+        return dash.no_update
 
 
 if __name__ == '__main__':
