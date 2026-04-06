@@ -129,10 +129,14 @@ class ProgressTracker:
                     'error': '#f44336'
                 }.get(step['status'], '#999')
                 
+                duration_text = ''
+                if step.get('duration'):
+                    duration_text = f" ({step['duration']:.2f}s)"
+
                 html_parts.append(
                     f'<div style="margin: 2px 0; color: {color};">'
                     f'{status_icon} {step["name"]}'
-                    f'{"" if not step["duration"] else f" ({step["duration"]:.2f}s)"}'
+                    f'{duration_text}'
                     f'</div>'
                 )
             html_parts.append('</div>')
