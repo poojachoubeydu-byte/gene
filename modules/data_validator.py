@@ -148,7 +148,9 @@ class DataValidator:
     
     def _standardize_columns(self, df):
         """Rename columns to standard names"""
-        df = df.rename(columns=self.col_map)
+        # col_map is {standard_name: actual_name}; rename needs {actual_name: standard_name}
+        rename_map = {actual: standard for standard, actual in self.col_map.items()}
+        df = df.rename(columns=rename_map)
         return df
     
     def _validate_data_types(self, df):

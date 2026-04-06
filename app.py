@@ -150,6 +150,7 @@ app = dash.Dash(__name__,
                 external_scripts=[],
                 suppress_callback_exceptions=True,
                 serve_locally=True,  # Serve assets locally instead of CDN
+                mathjax=False,       # Prevent Dash/Plotly from loading KaTeX/MathJax from CDN
                 meta_tags=[
                     {"name": "viewport", "content": "width=device-width, initial-scale=1"},
                     {"name": "description", "content": "Advanced RNA-seq Pathway Analysis Tool"},
