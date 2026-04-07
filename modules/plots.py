@@ -203,9 +203,21 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
         xaxis_title="Log2 Fold Change",
         yaxis_title="−log10(Adj. p-value)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=11)),
-        dragmode="select",          # default tool = box-select; user can switch to lasso
-        clickmode="event+select",   # enable both click and select events
+        dragmode="select",           # default tool = box-select; user can switch to lasso
+        clickmode="event+select",    # enable both click and select events
         margin=dict(t=60),
+        # Pre-declare the selections array and newselection style so Plotly.js
+        # registers them as known schema properties before the user draws anything.
+        # Without this initialisation, every user-drawn box/lasso triggers a cascade
+        # of "unrecognized GUI edit: selections[0].xref/yref/type/…" console warnings.
+        selections=[],
+        newselection=dict(
+            line=dict(color="#3498db", width=1, dash="dot"),
+        ),
+        activeselection=dict(
+            fillcolor="#3498db",
+            opacity=0.07,
+        ),
     )
     return fig
 
