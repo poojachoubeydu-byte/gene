@@ -1,568 +1,748 @@
-import plotly.graph_objects as go
-import plotly.express as px
+"""
+Plots Module — Apex Bioinformatics Platform
+============================================
+All Plotly figure builders. Every function is stateless and safe for
+concurrent workers.
+"""
+
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import networkx as nx
-import gseapy as gp
-from dash import dash_table, html
 
+CLUSTER_PAL = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6",
+               "#1abc9c", "#e67e22", "#16a085"]
+
+_BLANK_LAYOUT = dict(
+    template="simple_white",
+    xaxis=dict(visible=False),
+    yaxis=dict(visible=False),
+    margin=dict(l=20, r=20, t=40, b=20),
+)
+
+
+def blank(msg: str = "") -> go.Figure:
+    fig = go.Figure()
+    if msg:
+        fig.add_annotation(text=msg, xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False,
+                           font=dict(size=13, color="#666"))
+    fig.update_layout(**_BLANK_LAYOUT)
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Volcano Plot  (with cancer-gene overlay)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def create_volcano_plot(df, logfc_col, padj_col, gene_col,
-                        lfc_thresh=1.0, p_thresh=0.05,
-                        filtered_genes=None):
+                        lfc_thresh=1.0, p_thresh=0.05, filtered_genes=None):
+    from data.gene_annotations import CANCER_GENE_CENSUS, DRUG_GENE_INTERACTIONS
 
-    d = df.copy()
+    if isinstance(df, list):
+        df = pd.DataFrame(df)
+    if df.empty:
+        return go.Figure()
 
-    if d.empty or logfc_col not in d.columns:
-        fig = go.Figure().update_layout(
-            title="Load data or click Load Demo to begin",
-            template='simple_white',
-            xaxis_title="Log2 Fold Change",
-            yaxis_title="-log10(Adjusted P-value)"
-        )
-        # ADDED: FEATURE-D — empty state annotation when no data at all
-        if len(df) == 0:
-            fig.add_annotation(
-                text="⬆ Upload a DESeq2 / edgeR CSV or click Load Demo Data",
-                xref="paper", yref="paper", x=0.5, y=0.5,
-                showarrow=False, font=dict(size=15, color="#aaaaaa"),
-                align="center"
-            )
-        return fig
+    df = df.copy()
+    df["_nlp"] = -np.log10(df[padj_col].clip(lower=1e-300))
 
-    d['minus_log10_p'] = -np.log10(d[padj_col].replace(0, 1e-300))
-
-    d['status'] = 'Not Significant'
-    d.loc[(d[logfc_col] > lfc_thresh) & (d[padj_col] < p_thresh), 'status'] = 'Up-regulated'
-    d.loc[(d[logfc_col] < -lfc_thresh) & (d[padj_col] < p_thresh), 'status'] = 'Down-regulated'
+    up = (df[logfc_col] >  lfc_thresh) & (df[padj_col] < p_thresh)
+    dn = (df[logfc_col] < -lfc_thresh) & (df[padj_col] < p_thresh)
+    df["_cat"] = "Non-significant"
+    df.loc[up, "_cat"] = "Up-regulated"
+    df.loc[dn, "_cat"] = "Down-regulated"
 
     color_map = {
-        'Up-regulated':    '#E31A1C',
-        'Down-regulated':  '#1F78B4',
-        'Not Significant': '#CCCCCC'
+        "Up-regulated":    "#e74c3c",
+        "Down-regulated":  "#3498db",
+        "Non-significant": "#c8c8c8",
     }
 
+    has_base = "baseMean" in df.columns
     fig = go.Figure()
 
-    for status, color in color_map.items():
-        sub = d[d['status'] == status].copy()
-        if filtered_genes is not None and len(filtered_genes) > 0:
-            sub = sub[sub[gene_col].isin(filtered_genes)]
-        fig.add_trace(go.Scattergl(
-            x=sub[logfc_col],
-            y=sub['minus_log10_p'],
-            mode='markers',
-            name=status,
+    for cat, color in color_map.items():
+        sub = df[df["_cat"] == cat]
+        if sub.empty:
+            continue
+        base_vals = sub["baseMean"].values if has_base else np.zeros(len(sub))
+        customdata = np.column_stack([sub[gene_col].values, base_vals])
+        ht = ("<b>%{customdata[0]}</b><br>"
+              "Log2FC: %{x:.3f}<br>"
+              "−log10(p): %{y:.2f}<br>")
+        if has_base:
+            ht += "BaseMean: %{customdata[1]:.1f}"
+        ht += "<extra></extra>"
+        fig.add_trace(go.Scatter(
+            x=sub[logfc_col], y=sub["_nlp"],
+            mode="markers", name=cat,
             marker=dict(color=color, size=6, opacity=0.75),
-            customdata=sub[gene_col].values,
-            hovertemplate=(
-                "<b>%{customdata}</b><br>"
-                "Log2FC: %{x:.3f}<br>"
-                "-log10(padj): %{y:.3f}"
-                "<extra></extra>"
-            ),
-            selected=dict(
-                marker=dict(
-                    opacity=1.0,
-                    size=9,
-                    color=color
-                )
-            ),
-            unselected=dict(
-                marker=dict(
-                    opacity=0.2,
-                    size=5,
-                    color=color
-                )
-            )
+            customdata=customdata,
+            hovertemplate=ht,
         ))
 
-    fig.add_hline(y=-np.log10(p_thresh), line_dash="dash",
-                  line_color="grey", opacity=0.6)
-    fig.add_vline(x=lfc_thresh, line_dash="dash",
-                  line_color="grey", opacity=0.6)
-    fig.add_vline(x=-lfc_thresh, line_dash="dash",
-                  line_color="grey", opacity=0.6)
+    # ── Oncogene overlay (star marker, gold border) ──────────────────────────
+    onco_up = df[
+        up &
+        df[gene_col].str.upper().map(
+            lambda g: CANCER_GENE_CENSUS.get(g, {}).get("role") == "Oncogene"
+        )
+    ]
+    if not onco_up.empty:
+        cd = np.column_stack([
+            onco_up[gene_col].values,
+            onco_up[gene_col].str.upper().map(
+                lambda g: CANCER_GENE_CENSUS.get(g, {}).get("cancer_types", ["?"])[0]
+            ).values,
+        ])
+        fig.add_trace(go.Scatter(
+            x=onco_up[logfc_col], y=onco_up["_nlp"],
+            mode="markers+text",
+            name="Oncogene ↑",
+            text=onco_up[gene_col],
+            textposition="top center",
+            textfont=dict(size=9, color="#c0392b"),
+            marker=dict(symbol="star", size=13, color="#e74c3c",
+                        line=dict(color="#f39c12", width=2)),
+            customdata=cd,
+            hovertemplate="<b>%{customdata[0]}</b> (Oncogene)<br>"
+                          "Cancer: %{customdata[1]}<extra></extra>",
+        ))
 
-    sig = d[d['status'] != 'Not Significant']
-    if not sig.empty:
-        top15 = sig.nlargest(15, 'minus_log10_p')
-        for row in top15.itertuples():
-            fig.add_annotation(
-                x=getattr(row, logfc_col),
-                y=row.minus_log10_p,
-                text=getattr(row, gene_col),
-                showarrow=False,
-                font=dict(size=9, color='#333333'),
-                xanchor='left',
-                yanchor='bottom'
-            )
+    # ── TSG overlay (diamond marker, blue border) ────────────────────────────
+    tsg_dn = df[
+        dn &
+        df[gene_col].str.upper().map(
+            lambda g: CANCER_GENE_CENSUS.get(g, {}).get("role") == "TSG"
+        )
+    ]
+    if not tsg_dn.empty:
+        cd2 = np.column_stack([
+            tsg_dn[gene_col].values,
+            tsg_dn[gene_col].str.upper().map(
+                lambda g: CANCER_GENE_CENSUS.get(g, {}).get("cancer_types", ["?"])[0]
+            ).values,
+        ])
+        fig.add_trace(go.Scatter(
+            x=tsg_dn[logfc_col], y=tsg_dn["_nlp"],
+            mode="markers+text",
+            name="TSG ↓",
+            text=tsg_dn[gene_col],
+            textposition="bottom center",
+            textfont=dict(size=9, color="#2980b9"),
+            marker=dict(symbol="diamond", size=11, color="#3498db",
+                        line=dict(color="#1a5276", width=2)),
+            customdata=cd2,
+            hovertemplate="<b>%{customdata[0]}</b> (Tumor Suppressor)<br>"
+                          "Cancer: %{customdata[1]}<extra></extra>",
+        ))
+
+    # ── Drug-target stars ────────────────────────────────────────────────────
+    drug_sig = df[
+        (df["_cat"] != "Non-significant") &
+        df[gene_col].str.upper().isin(DRUG_GENE_INTERACTIONS.keys())
+    ]
+    # Exclude already-labelled oncogene/TSG to avoid clutter
+    already = set(onco_up[gene_col].str.upper().tolist() + tsg_dn[gene_col].str.upper().tolist())
+    drug_sig = drug_sig[~drug_sig[gene_col].str.upper().isin(already)]
+    if not drug_sig.empty:
+        # customdata col-0 = gene name so lasso selection captures these genes
+        _drug_cd = np.column_stack([
+            drug_sig[gene_col].values,
+            np.zeros(len(drug_sig)),
+        ])
+        fig.add_trace(go.Scatter(
+            x=drug_sig[logfc_col], y=drug_sig["_nlp"],
+            mode="markers",
+            name="Drug target",
+            marker=dict(symbol="circle-open", size=14, color="#27ae60",
+                        line=dict(color="#27ae60", width=2)),
+            customdata=_drug_cd,
+            hovertemplate="<b>%{customdata[0]}</b> — FDA drug target<extra></extra>",
+        ))
+
+    # ── Threshold lines ──────────────────────────────────────────────────────
+    fig.add_hline(y=-np.log10(p_thresh), line_dash="dash", line_color="gray", opacity=0.45)
+    fig.add_vline(x= lfc_thresh,         line_dash="dash", line_color="gray", opacity=0.45)
+    fig.add_vline(x=-lfc_thresh,         line_dash="dash", line_color="gray", opacity=0.45)
+
+    # ── Label top significant (non-annotated) ────────────────────────────────
+    sig_rest = df[
+        (df["_cat"] != "Non-significant") &
+        ~df[gene_col].str.upper().isin(
+            set(onco_up[gene_col].str.upper().tolist()) | set(tsg_dn[gene_col].str.upper().tolist())
+        )
+    ].nlargest(8, "_nlp")
+    for _, row in sig_rest.iterrows():
+        fig.add_annotation(
+            x=row[logfc_col], y=row["_nlp"],
+            text=str(row[gene_col]),
+            showarrow=False, font=dict(size=9), yshift=9,
+        )
 
     fig.update_layout(
-        template='simple_white',
-        title=dict(text="Differential Expression \u2014 Volcano Plot",
-                   font=dict(size=14)),
+        template="simple_white",
+        title=dict(text="Volcano Plot  <span style='font-size:11px;color:#888;'>"
+                        "★ Oncogene  ◆ TSG  ○ Drug target</span>", font=dict(size=14)),
         xaxis_title="Log2 Fold Change",
-        yaxis_title="-log10(Adjusted P-value)",
-        hovermode='closest',
-        dragmode='lasso',
-        clickmode='event+select',
-        legend=dict(orientation="h", yanchor="bottom",
-                    y=1.02, xanchor="right", x=1),
-        margin=dict(l=50, r=30, t=80, b=50)
+        yaxis_title="−log10(Adj. p-value)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=11)),
+        margin=dict(t=60),
     )
-
     return fig
 
 
-def create_pathway_enrichment(selected_genes, gene_sets='KEGG_2021_Human'):  # ADDED: FEATURE-B
-    """
-    ORA via GSEApy Enrichr against selected gene set database.
-    Statistical method: Fisher exact test, Benjamini-Hochberg correction.
-    ALWAYS returns (fig, table_component, gene_index_dict, enrichment_json) — exactly 4 values.
-    """
+# ─────────────────────────────────────────────────────────────────────────────
+# Meta-Score Bar
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # ── Guard: too few genes ─────────────────────────────
-    if not selected_genes or len(selected_genes) < 5:
-        fig = go.Figure().update_layout(
-            title="Select \u22655 genes on the volcano plot to run enrichment",
-            template='simple_white'
-        )
-        msg = html.P(
-            "Select at least 5 genes using lasso selection on the volcano plot.",
-            style={'color': '#666', 'fontStyle': 'italic', 'padding': '10px'}
-        )
-        return fig, msg, {}, None  # FIXED: BUG-1
+def create_meta_score_bar(df: pd.DataFrame) -> go.Figure:
+    if isinstance(df, list):
+        df = pd.DataFrame(df)
+    if df is None or df.empty or "meta_score" not in df.columns:
+        return blank("No meta-score data.")
 
-    # ── Run Enrichr ──────────────────────────────────────
-    try:
-        enr = gp.enrichr(
-            gene_list=selected_genes,
-            gene_sets=gene_sets if gene_sets else 'KEGG_2021_Human',  # ADDED: FEATURE-B
-            outdir=None,
-            cutoff=0.05
-        )
-        results = enr.results.copy()
-    except Exception as e:
-        fig = go.Figure().update_layout(
-            title="Enrichr API unavailable \u2014 please retry in a moment",
-            template='simple_white'
-        )
-        msg = html.P(
-            f"Enrichr API error: {str(e)[:120]}. Please retry.",
-            style={'color': '#c0392b', 'padding': '10px', 'fontSize': '12px'}
-        )
-        return fig, msg, {}, None  # FIXED: BUG-1
+    HOUSE = {"ACTB", "GAPDH", "B2M", "RPLP0", "HPRT1", "GUSB", "TBP"}
+    top = df[~df["symbol"].isin(HOUSE)].nlargest(20, "meta_score")
 
-    # ── Filter significant results ───────────────────────
-    results = results[results['Adjusted P-value'] < 0.05].copy()
-
-    if results.empty:
-        fig = go.Figure().update_layout(
-            title="No significant pathways at padj < 0.05",
-            template='simple_white'
-        )
-        msg = html.P(
-            "No significant KEGG or Reactome pathways found. "
-            "Try selecting more genes or relaxing thresholds.",
-            style={'color': '#666', 'padding': '10px', 'fontSize': '12px'}
-        )
-        return fig, msg, {}, None  # FIXED: BUG-1
-
-    # FIXED: BUG-2 — robust Overlap parsing ("5/100" or plain int); proper sizeref
-    results = results.copy()
-    results['overlap_count'] = results['Overlap'].apply(
-        lambda x: int(str(x).split('/')[0]) if '/' in str(x) else int(x)
-    )
-    max_overlap = results['overlap_count'].max()
-    sizeref = 2.0 * max_overlap / (30 ** 2) if max_overlap > 0 else 1
-
-    # ── Sort and limit ───────────────────────────────────
-    results = results.sort_values('Combined Score', ascending=False).head(20)
-
-    # ── Normalise Combined Score to 0-100 range for display ──
-    # Raw Enrichr Combined Score scale varies by gseapy version.
-    cs_max = results['Combined Score'].max()
-    if cs_max > 1000:
-        results['Combined Score Display'] = (
-            results['Combined Score'] / cs_max * 100
-        ).round(1)
-        score_col = 'Combined Score Display'
-        xaxis_label = 'Normalised Combined Score (0–100)'
-    else:
-        score_col = 'Combined Score'
-        xaxis_label = 'Combined Score'
-
-    # ── Truncate long pathway names ──────────────────────
-    results['Term_display'] = results['Term'].apply(
-        lambda x: x[:50] + '…' if len(str(x)) > 50 else str(x)
-    )
-
-    # ── Build gene index dict ────────────────────────────
-    gene_index_dict = {}
-    for _, row in results.iterrows():
-        genes = [g.strip() for g in str(row['Genes']).split(';') if g.strip()]
-        gene_index_dict[row['Term']] = genes
-
-    # ── Bubble chart ─────────────────────────────────────
-    neg_log_p = -np.log10(results['Adjusted P-value'].clip(lower=1e-300))
-
-    fig = go.Figure(data=[go.Scatter(
-        x=results[score_col],
-        y=results['Term_display'],
-        mode='markers',
+    fig = go.Figure(go.Bar(
+        x=top["meta_score"][::-1],
+        y=top["symbol"][::-1],
+        orientation="h",
         marker=dict(
-            size=results['overlap_count'].tolist(),  # FIXED: BUG-2
-            sizemode='diameter',
-            sizeref=sizeref,                         # FIXED: BUG-2
-            color=neg_log_p.tolist(),
-            colorscale='RdYlBu',
-            reversescale=True,
+            color=top["meta_score"][::-1],
+            colorscale="RdYlGn", cmin=0, cmax=100,
             showscale=True,
-            colorbar=dict(
-                title=dict(text='-log10<br>Adj.P', side='right'),
-                thickness=14,
-                len=0.75,
-                x=1.02,
-                xanchor='left'
-            )
+            colorbar=dict(title="Meta-Score", thickness=12),
         ),
-        customdata=results['Term'].values,
-        hovertemplate=(
-            "<b>%{y}</b><br>"
-            "Combined Score: %{x:.1f}<br>"
-            "Overlap: %{text}<br>"
-            "-log10(Adj.P): %{marker.color:.2f}"
-            "<extra></extra>"
-        ),
-        text=results['Overlap'].tolist()
-    )])
-
+        hovertemplate="<b>%{y}</b>: %{x:.1f}<extra></extra>",
+    ))
     fig.update_layout(
-        title=dict(text='Pathway Enrichment (KEGG + Reactome)',
-                   font=dict(size=13)),
-        xaxis_title=xaxis_label,
-        yaxis_title='',
-        template='simple_white',
-        margin=dict(l=320, r=80, t=50, b=50),
-        height=520,
-        xaxis=dict(
-            title=dict(
-                text='Normalised Combined Score (0–100)',
-                font=dict(size=11)
-            )
-        ),
-        yaxis=dict(
-            tickfont=dict(size=9),
-            automargin=True
-        )
+        template="simple_white",
+        title="Top Genes by Meta-Score",
+        xaxis_title="Meta-Score (0–100)",
+        margin=dict(l=80, r=20, t=50, b=40),
     )
-
-    # ── Table ─────────────────────────────────────────────
-    table_cols_base = ['Term', 'overlap_count', 'Adjusted P-value']  # FIXED: FEATURE-E
-    if 'Gene_set' in results.columns:
-        table_cols_base = ['Term', 'Gene_set', 'overlap_count', 'Adjusted P-value']  # FIXED: FEATURE-E
-    table_cols_present = table_cols_base + [score_col]
-
-    table = dash_table.DataTable(
-        data=results[table_cols_present].head(10).to_dict('records'),
-        columns=[
-            {'name': 'Pathway',    'id': 'Term'},
-            {'name': 'Database',   'id': 'Gene_set'},
-            {'name': 'Genes in Overlap', 'id': 'overlap_count', 'type': 'numeric'},  # FIXED: FEATURE-E
-            {'name': 'Adj. P-val', 'id': 'Adjusted P-value',
-             'type': 'numeric', 'format': {'specifier': '.2e'}},
-            {'name': 'Score',      'id': score_col,
-             'type': 'numeric', 'format': {'specifier': '.1f'}},
-        ],
-        style_table={'overflowX': 'auto', 'maxHeight': '220px',
-                     'overflowY': 'auto'},
-        style_cell={'textAlign': 'left', 'padding': '5px 8px',
-                    'fontSize': '11px', 'whiteSpace': 'normal',
-                    'height': 'auto', 'maxWidth': '180px'},
-        style_header={'backgroundColor': '#f0f4f8', 'fontWeight': 'bold',
-                      'fontSize': '11px'},
-        style_data_conditional=[
-            {'if': {'row_index': 'odd'}, 'backgroundColor': '#fafafa'}
-        ],
-        export_format='csv',
-        export_headers='display',
-        page_size=10
-    )
-
-    # FIXED: BUG-1 — serialize enrichment results for enrichment-results-store
-    enrichment_json = results[['Term', 'Genes']].to_json(orient='records')
-
-    # ── CRITICAL: always return exactly 4 values ─────────
-    return fig, table, gene_index_dict, enrichment_json
+    return fig
 
 
-def create_heatmap(df, selected_genes):
-    """
-    Fold-change profile heatmap.
-    INPUT: DEG summary table (one row per gene, columns include
-    'symbol', 'log2FC', 'padj'). NOT a per-sample expression matrix.
-    Z-score normalization is intentionally omitted — it is mathematically
-    invalid on a single numeric column (log2FC). This heatmap correctly
-    shows fold-change direction and magnitude per gene.
-    """
+# ─────────────────────────────────────────────────────────────────────────────
+# Pathway Bubble + Bar
+# ─────────────────────────────────────────────────────────────────────────────
 
-    if df is None or df.empty or not selected_genes:
-        return go.Figure().update_layout(
-            title="Select genes on the volcano plot to populate this view",
-            template='simple_white'
-        )
+def create_pathway_bubble(enr: pd.DataFrame) -> go.Figure:
+    if enr is None or enr.empty:
+        return blank("No significant pathways found.")
 
-    filtered = df[df['symbol'].isin(selected_genes)].copy()
+    top = enr.head(15).copy()
+    top["nlp"]   = -np.log10(top["adjusted_p_value"].clip(lower=1e-300))
+    top["label"] = top["pathway"].str[:52]
+    if "database" in top.columns:
+        db_short = top["database"].str.upper().str[:3]
+        top["label"] = db_short + " · " + top["label"]
 
-    if len(filtered) < 2:
-        return go.Figure().update_layout(
-            title="Select at least 2 genes to display the heatmap",
-            template='simple_white'
-        )
-
-    filtered = filtered.sort_values('log2FC', ascending=True)
-
-    # FIXED: BUG-5 — fall back to bar chart when no per-sample expression columns exist
-    numeric_df = filtered.select_dtypes(include=[np.number])
-    sample_cols = [c for c in numeric_df.columns
-                   if c not in ['log2FC', 'padj', 'baseMean', 'lfcSE', 'stat', 'pvalue']]
-    if len(sample_cols) < 2:
-        bar_df = filtered[['symbol', 'log2FC']].dropna()
-        fig = go.Figure(go.Bar(
-            x=bar_df['symbol'], y=bar_df['log2FC'],
-            marker_color=['#E31A1C' if v > 0 else '#1F78B4' for v in bar_df['log2FC']]
-        ))
-        fig.update_layout(
-            title='Log2 Fold Change of Selected Genes (upload expression matrix for heatmap)',
-            xaxis_title='Gene', yaxis_title='Log2FC',
-            template='simple_white'
-        )
-        return fig
-
-    z = [[float(v)] for v in filtered['log2FC'].tolist()]
-    y_labels = filtered['symbol'].tolist()
-    customdata = filtered[['symbol', 'log2FC', 'padj']].values.tolist()
-
-    # Use actual data range — do not clamp artificially.
-    # Symmetric scale centered at 0 preserves relative differences.
-    actual_max = float(filtered['log2FC'].abs().max())
-    lfc_abs_max = actual_max if actual_max > 0 else 1.0
-
-    fig = go.Figure(data=go.Heatmap(
-        z=z,
-        y=filtered['symbol'].str.strip().tolist(),
-        x=[''],
-        colorscale='RdBu_r',
-        zmid=0,
-        zmin=-lfc_abs_max,
-        zmax=lfc_abs_max,
-        colorbar=dict(
-            title=dict(text='Log2FC', side='right'),
-            thickness=16,
-            len=0.8
+    fig = go.Figure(go.Scatter(
+        x=top["enrichment_score"], y=top["label"],
+        mode="markers",
+        marker=dict(
+            size=np.clip(top["overlap_count"] * 6, 8, 55),
+            color=top["nlp"],
+            colorscale="RdYlBu", reversescale=True,
+            showscale=True,
+            colorbar=dict(title="−log10 p", thickness=12),
         ),
-        customdata=customdata,
+        text=top.get("genes", top["pathway"]),
+        customdata=top[["overlap_count", "pathway_size", "adjusted_p_value"]].values,
         hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "Log2FC: %{customdata[1]:.3f}<br>"
-            "Adj.P: %{customdata[2]:.2e}"
-            "<extra></extra>"
-        )
+            "<b>%{y}</b><br>Enrich. Score: %{x:.1f}<br>"
+            "Overlap: %{customdata[0]}/%{customdata[1]}<br>"
+            "Adj. p: %{customdata[2]:.2e}<extra></extra>"
+        ),
+    ))
+    fig.update_layout(
+        template="simple_white",
+        title="Pathway Enrichment Bubble",
+        xaxis_title="Enrichment Score (−log10 p)",
+        yaxis=dict(autorange="reversed"),
+        height=440, margin=dict(l=10, r=10, t=45, b=30),
+    )
+    return fig
+
+
+def create_pathway_bar(enr: pd.DataFrame) -> go.Figure:
+    if enr is None or enr.empty:
+        return blank("No pathways enriched.")
+
+    top = enr.head(12).copy()
+    top["nlp"]   = -np.log10(top["adjusted_p_value"].clip(lower=1e-300))
+    top["label"] = top["pathway"].str[:50]
+
+    fig = go.Figure(go.Bar(
+        x=top["nlp"][::-1], y=top["label"][::-1],
+        orientation="h",
+        marker=dict(color=top["enrichment_score"][::-1],
+                    colorscale="Blues", showscale=False),
+        text=top["overlap_count"][::-1].astype(str) + " genes",
+        textposition="inside",
+        hovertemplate="<b>%{y}</b><br>−log10 p: %{x:.2f}<extra></extra>",
+    ))
+    fig.update_layout(
+        template="simple_white",
+        title="Top Enriched Pathways",
+        xaxis_title="−log10(Adj. p-value)",
+        height=380, margin=dict(l=10, r=10, t=45, b=30),
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pathway Crosstalk Heatmap  (Jaccard similarity)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_pathway_crosstalk(crosstalk_df: pd.DataFrame) -> go.Figure:
+    if crosstalk_df is None or crosstalk_df.empty:
+        return blank("Insufficient enriched pathways for crosstalk analysis.")
+
+    fig = go.Figure(go.Heatmap(
+        z=crosstalk_df.values,
+        x=crosstalk_df.columns.tolist(),
+        y=crosstalk_df.index.tolist(),
+        colorscale="YlOrRd",
+        zmin=0, zmax=1,
+        hovertemplate=(
+            "<b>%{y}</b><br>vs <b>%{x}</b><br>"
+            "Jaccard similarity: %{z:.2f}<extra></extra>"
+        ),
+        colorbar=dict(title="Jaccard", thickness=12),
+    ))
+    fig.update_layout(
+        template="simple_white",
+        title="Pathway Crosstalk — Jaccard Gene Overlap",
+        xaxis=dict(tickangle=-40, tickfont=dict(size=9)),
+        yaxis=dict(tickfont=dict(size=9), autorange="reversed"),
+        height=440,
+        margin=dict(l=10, r=10, t=50, b=10),
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Drug Target Chart
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_drug_target_chart(drug_df: pd.DataFrame, deg_df: pd.DataFrame) -> go.Figure:
+    """
+    Scatter: x = Log2FC of gene, y = number of FDA drugs targeting it.
+    Bubble size = number of total drugs (FDA + clinical).
+    Color = FDA-approved count.
+    """
+    if drug_df is None or drug_df.empty:
+        return blank("No FDA-approved drug targets among significant genes.")
+
+    # Aggregate per gene
+    g = drug_df.groupby("gene").agg(
+        n_drugs=("drug", "count"),
+        n_fda=("fda", "sum"),
+        drug_types=("type", lambda x: ", ".join(x.unique()[:3])),
+        indications=("indication", lambda x: " | ".join(x.unique()[:2])),
+    ).reset_index()
+
+    # Merge with DEG data for fold change
+    if deg_df is not None and not deg_df.empty:
+        lfc_map = dict(zip(deg_df["symbol"].str.upper(), deg_df["log2FC"]))
+        g["log2FC"] = g["gene"].map(lfc_map).fillna(0)
+    else:
+        g["log2FC"] = 0.0
+
+    fig = go.Figure(go.Scatter(
+        x=g["log2FC"],
+        y=g["n_fda"],
+        mode="markers+text",
+        text=g["gene"],
+        textposition="top center",
+        textfont=dict(size=10),
+        marker=dict(
+            size=np.clip(g["n_drugs"] * 8, 12, 50),
+            color=g["n_fda"],
+            colorscale="Greens",
+            showscale=True,
+            colorbar=dict(title="FDA drugs", thickness=12),
+            line=dict(color="#2c3e50", width=1),
+            opacity=0.85,
+        ),
+        customdata=np.column_stack([g["drug_types"], g["indications"], g["n_drugs"]]),
+        hovertemplate=(
+            "<b>%{text}</b><br>"
+            "Log2FC: %{x:.2f}<br>"
+            "FDA-approved drugs: %{y}<br>"
+            "Types: %{customdata[0]}<br>"
+            "Indications: %{customdata[1]}<br>"
+            "Total drugs: %{customdata[2]}<extra></extra>"
+        ),
     ))
 
-    n_genes = len(filtered)
-    fig.update_layout(
-        title=dict(
-            text=f'Fold-Change Profile — {n_genes} Selected Genes',
-            font=dict(size=12)
-        ),
-        template='simple_white',
-        margin=dict(l=180, r=40, t=50, b=30),
-        # FIXED: BUG-3 — explicit tick positioning so labels render on correct rows
-        yaxis=dict(
-            tickmode='array',
-            tickvals=list(range(len(filtered))),
-            ticktext=filtered['symbol'].tolist(),
-            tickfont=dict(size=10),
-            automargin=True,
-            ticklabelposition='outside left'
-        ),
-        xaxis=dict(showticklabels=False)
-    )
-
+    fig.add_vline(x=0, line_dash="dash", line_color="#aaa", opacity=0.5)
     fig.add_annotation(
-        text="Red = upregulated  |  Blue = downregulated  "
-             "|  Sorted by Log2FC",
-        xref='paper', yref='paper',
-        x=0.5, y=-0.08,
-        showarrow=False,
-        font=dict(size=9, color='#666666'),
-        xanchor='center'
+        x=max(g["log2FC"].max() * 0.6, 0.5), y=g["n_fda"].max() * 0.9,
+        text="⬆ Upregulated targets<br>(inhibitor candidates)",
+        showarrow=False, font=dict(size=9, color="#c0392b"),
+        bgcolor="rgba(255,220,210,0.7)",
+    )
+    fig.add_annotation(
+        x=min(g["log2FC"].min() * 0.6, -0.5), y=g["n_fda"].max() * 0.9,
+        text="⬇ Downregulated targets<br>(activator candidates)",
+        showarrow=False, font=dict(size=9, color="#2980b9"),
+        bgcolor="rgba(210,230,255,0.7)",
     )
 
-    return fig
-
-
-def create_3d_pca(pca_result):
-    if not pca_result or 'genes' not in pca_result:
-        return go.Figure().update_layout(
-            title='Load data to generate the 3D PCA projection',
-            template='simple_white'
-        )
-
-    df = pd.DataFrame({
-        'gene': pca_result['genes'],
-        'pc1': pca_result['pc1'],
-        'pc2': pca_result['pc2'],
-        'pc3': pca_result['pc3'],
-        'cluster': pca_result['clusters']
-    })
-
-    fig = px.scatter_3d(
-        df,
-        x='pc1', y='pc2', z='pc3',
-        color='cluster',
-        hover_name='gene',
-        opacity=0.8,
-        color_continuous_scale='Spectral',
-        labels={'pc1': 'PC1', 'pc2': 'PC2', 'pc3': 'PC3'}
-    )
-
-    fig.update_traces(marker=dict(size=5), selector=dict(type='scatter3d'))
     fig.update_layout(
-        template='simple_white',
-        title='3D PCA Projection',
-        margin=dict(l=0, r=0, t=40, b=0),
-        legend_title_text='Cluster'
+        template="simple_white",
+        title="Drug Target Landscape — Significant DE Genes",
+        xaxis_title="Log2 Fold Change",
+        yaxis_title="# FDA-Approved Drugs Targeting Gene",
+        height=440,
     )
     return fig
 
 
-def create_gsea_bar(gsea_result):
-    if not gsea_result or gsea_result.get('results', pd.DataFrame()).empty:
-        return go.Figure().update_layout(
-            title='Preranked GSEA results unavailable',
-            template='simple_white'
-        )
+# ─────────────────────────────────────────────────────────────────────────────
+# Drug type breakdown donut
+# ─────────────────────────────────────────────────────────────────────────────
 
-    results = gsea_result['results'].copy()
-    if results.empty:
-        return go.Figure().update_layout(
-            title='No significant pathways available',
-            template='simple_white'
-        )
+def create_drug_type_donut(drug_df: pd.DataFrame) -> go.Figure:
+    if drug_df is None or drug_df.empty:
+        return blank("No drug data.")
 
-    results = results.sort_values('NES', ascending=False).head(12)
-    results['Term_trunc'] = results['Term'].apply(
-        lambda x: x if len(str(x)) <= 45 else str(x)[:42] + '...'
+    counts = drug_df[drug_df["fda"] == True].groupby("type").size().sort_values(ascending=False)
+    if counts.empty:
+        return blank("No FDA-approved drugs found.")
+
+    fig = go.Figure(go.Pie(
+        labels=counts.index,
+        values=counts.values,
+        hole=0.45,
+        textinfo="label+percent",
+        hovertemplate="<b>%{label}</b><br>%{value} drugs (%{percent})<extra></extra>",
+        marker=dict(colors=["#27ae60", "#3498db", "#e74c3c", "#f39c12",
+                             "#9b59b6", "#1abc9c", "#e67e22", "#16a085"]),
+    ))
+    fig.update_layout(
+        template="simple_white",
+        title="FDA Drug Mechanism Classes",
+        height=340,
+        showlegend=True,
+        legend=dict(font=dict(size=10)),
     )
+    return fig
 
-    fig = go.Figure(data=go.Bar(
-        x=results['NES'],
-        y=results['Term_trunc'],
-        orientation='h',
-        marker=dict(
-            color=results['FDR q-val'],
-            colorscale='RdYlGn',
-            reversescale=True,
-            colorbar=dict(title='FDR q-val')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Biomarker Score Chart
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_biomarker_score_chart(bm_df: pd.DataFrame) -> go.Figure:
+    if bm_df is None or bm_df.empty or "biomarker_score" not in bm_df.columns:
+        return blank("Run analysis to see biomarker scores.")
+
+    HOUSE = {"ACTB", "GAPDH", "B2M", "RPLP0", "HPRT1", "GUSB", "TBP"}
+    top = bm_df[~bm_df["symbol"].isin(HOUSE)].nlargest(25, "biomarker_score")
+
+    colors = []
+    for _, row in top.iterrows():
+        role = str(row.get("cancer_role", ""))
+        if role == "Oncogene":
+            colors.append("#e74c3c")
+        elif role == "TSG":
+            colors.append("#3498db")
+        elif role == "Both":
+            colors.append("#9b59b6")
+        elif row.get("is_drug_target"):
+            colors.append("#27ae60")
+        else:
+            colors.append("#95a5a6")
+
+    fig = go.Figure(go.Bar(
+        x=top["biomarker_score"][::-1],
+        y=top["symbol"][::-1],
+        orientation="h",
+        marker=dict(color=colors[::-1]),
+        customdata=np.column_stack([
+            top["cancer_role"][::-1].fillna(""),
+            top["is_drug_target"][::-1].fillna(""),
+            top["biomarker_type"][::-1].fillna(""),
+            top["log2FC"][::-1],
+        ]),
+        hovertemplate=(
+            "<b>%{y}</b> — Score: %{x:.1f}<br>"
+            "Cancer role: %{customdata[0]}<br>"
+            "Drug target: %{customdata[1]}<br>"
+            "Biomarker: %{customdata[2]}<br>"
+            "Log2FC: %{customdata[3]:.2f}<extra></extra>"
         ),
-        text=results['Term'].tolist(),
-        hovertemplate='Pathway: %{text}<br>NES: %{x:.2f}<br>FDR q-val: %{marker.color:.2e}<extra></extra>'
     ))
 
+    # Legend annotations
+    for label, color in [("Oncogene","#e74c3c"),("TSG","#3498db"),
+                          ("Both","#9b59b6"),("Drug target","#27ae60"),("Other","#95a5a6")]:
+        fig.add_annotation(
+            text=f"<span style='color:{color}'>■</span> {label}",
+            xref="paper", yref="paper",
+            x=1.01, y={"Oncogene":0.98,"TSG":0.90,"Both":0.82,"Drug target":0.74,"Other":0.66}[label],
+            showarrow=False, font=dict(size=10), align="left",
+        )
+
     fig.update_layout(
-        template='simple_white',
-        title='Preranked GSEA Pathway Enrichment',
-        xaxis_title='Normalized Enrichment Score (NES)',
-        yaxis_title='',
-        margin=dict(l=240, r=40, t=50, b=40),
-        height=420
+        template="simple_white",
+        title="Biomarker Priority Score (Meta + Clinical Bonus)",
+        xaxis_title="Biomarker Score (0–100)",
+        margin=dict(l=80, r=130, t=50, b=40),
+        height=480,
     )
     return fig
 
 
-def create_network_graph(network_data):
-    if not network_data or 'graph' not in network_data:
-        return go.Figure().update_layout(
-            title='No co-expression network available',
-            template='simple_white'
-        )
+# ─────────────────────────────────────────────────────────────────────────────
+# MA Plot, P-value histogram, LFC distribution, Rank metric
+# ─────────────────────────────────────────────────────────────────────────────
 
-    G = network_data['graph']
-    if G.number_of_nodes() == 0:
-        return go.Figure().update_layout(
-            title='No network edges were generated',
-            template='simple_white'
-        )
+def create_ma_plot(df: pd.DataFrame) -> go.Figure:
+    df = df.copy()
+    has_base = "baseMean" in df.columns
+    x = (np.log10(df["baseMean"].clip(lower=0.1))
+         if has_base else np.arange(len(df), dtype=float))
+    df["_x"] = x
+    df["_nlp"] = -np.log10(df["padj"])
+    sig = df["_nlp"] > -np.log10(0.05)
 
-    pos = nx.spring_layout(G, seed=42)
-    edge_traces = []
-    for edge in G.edges(data=True):
-        x0, y0 = pos[edge[0]]
-        x1, y1 = pos[edge[1]]
-        edge_traces.append(go.Scatter(
-            x=[x0, x1, None],
-            y=[y0, y1, None],
-            mode='lines',
-            line=dict(width=0.7, color='#888'),
-            hoverinfo='none'
+    fig = go.Figure()
+    for mask, col, name in [(~sig, "#c8c8c8", "NS"),
+                             (sig & (df["log2FC"] > 0), "#e74c3c", "Up"),
+                             (sig & (df["log2FC"] < 0), "#3498db", "Down")]:
+        sub = df[mask]
+        fig.add_trace(go.Scatter(
+            x=sub["_x"], y=sub["log2FC"],
+            mode="markers", name=name,
+            marker=dict(color=col, size=5, opacity=0.7),
+            text=sub["symbol"],
+            hovertemplate="<b>%{text}</b>  Log2FC %{y:.3f}<extra></extra>",
         ))
-
-    node_trace = go.Scatter(
-        x=[pos[node][0] for node in G.nodes()],
-        y=[pos[node][1] for node in G.nodes()],
-        mode='markers+text',
-        marker=dict(
-            size=6,
-            color=[network_data.get('labels', {}).get(node, 0) for node in G.nodes()],
-            colorscale='Viridis',
-            showscale=False
-        ),
-        text=[node for node in G.nodes()],
-        hovertemplate='<b>%{text}</b><extra></extra>'
-    )
-
-    fig = go.Figure(data=edge_traces + [node_trace])
+    fig.add_hline(y=0, line_color="gray", line_dash="dash", opacity=0.5)
     fig.update_layout(
-        template='simple_white',
-        title='WGCNA-lite Co-expression Network',
-        showlegend=False,
-        margin=dict(l=40, r=40, t=50, b=40),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+        template="simple_white",
+        title="MA Plot (Mean vs Fold Change)",
+        xaxis_title="log10(Base Mean)" if has_base else "Gene Rank",
+        yaxis_title="Log2 Fold Change",
+        height=340, legend=dict(orientation="h", y=1.05),
     )
     return fig
 
 
-def create_meta_score_bar(df):
-    if df is None or df.empty or 'meta_score' not in df.columns:
-        return go.Figure().update_layout(
-            title='Meta-Score prioritisation will appear here',
-            template='simple_white'
-        )
+def create_pval_hist(df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure(go.Histogram(
+        x=df["padj"], nbinsx=40,
+        marker_color="#3498db", opacity=0.75,
+    ))
+    fig.add_vline(x=0.05, line_dash="dash", line_color="red",
+                  annotation_text="p=0.05", annotation_position="top right")
+    fig.update_layout(
+        template="simple_white", title="Adj. P-value Distribution",
+        xaxis_title="Adj. p-value", yaxis_title="Count",
+        height=300, showlegend=False,
+    )
+    return fig
 
-    top = df.sort_values('meta_score', ascending=False).head(20)
-    fig = go.Figure(data=go.Bar(
-        x=top['meta_score'][::-1],
-        y=top['symbol'][::-1],
-        orientation='h',
-        marker=dict(
-            color=top['meta_score'][::-1],
-            colorscale='RdYlGn',
-            cmin=0,
-            cmax=100
+
+def create_lfc_dist(df: pd.DataFrame) -> go.Figure:
+    up = (df["log2FC"] > 1) & (df["padj"] < 0.05)
+    dn = (df["log2FC"] < -1) & (df["padj"] < 0.05)
+    ns = ~(up | dn)
+    fig = go.Figure()
+    for mask, col, name in [(ns, "#c8c8c8", "Non-sig"),
+                             (up, "#e74c3c", "Up"),
+                             (dn, "#3498db", "Down")]:
+        fig.add_trace(go.Histogram(
+            x=df.loc[mask, "log2FC"], nbinsx=30, name=name,
+            marker_color=col, opacity=0.7,
+        ))
+    fig.update_layout(
+        template="simple_white", barmode="overlay",
+        title="Log2FC Distribution",
+        xaxis_title="Log2FC", yaxis_title="Count",
+        height=300, legend=dict(orientation="h", y=1.05),
+    )
+    return fig
+
+
+def create_rank_metric(df: pd.DataFrame) -> go.Figure:
+    df = df.copy()
+    df["rank"] = np.sign(df["log2FC"]) * -np.log10(df["padj"])
+    df = df.sort_values("rank", ascending=False).reset_index(drop=True)
+    up = df["rank"] > 0
+    dn = df["rank"] < 0
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=df.index[up], y=df.loc[up, "rank"],
+                         marker_color="#e74c3c", name="Up", showlegend=False))
+    fig.add_trace(go.Bar(x=df.index[dn], y=df.loc[dn, "rank"],
+                         marker_color="#3498db", name="Down", showlegend=False))
+    for _, row in df.head(5).iterrows():
+        fig.add_annotation(x=row.name, y=row["rank"], text=row["symbol"],
+                           showarrow=False, font=dict(size=8), yshift=8)
+    for _, row in df.tail(5).iterrows():
+        fig.add_annotation(x=row.name, y=row["rank"], text=row["symbol"],
+                           showarrow=False, font=dict(size=8), yshift=-14)
+    fig.update_layout(
+        template="simple_white",
+        title="GSEA Pre-rank Metric  (sign × −log10 p)",
+        xaxis_title="Gene Rank", yaxis_title="Rank Metric",
+        height=320, bargap=0,
+    )
+    return fig
+
+
+def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
+                       p_t: float = 0.05, top_n: int = 30) -> go.Figure:
+    HOUSE = {"ACTB", "GAPDH", "B2M", "RPLP0", "HPRT1", "GUSB", "TBP"}
+    sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+    if sig.empty:
+        sig = df
+    sig = sig[~sig["symbol"].isin(HOUSE)]
+    top = pd.concat([
+        sig.nlargest(top_n, "log2FC"),
+        sig.nsmallest(top_n // 2, "log2FC"),
+    ]).drop_duplicates("symbol")
+    z = np.column_stack([-np.log10(top["padj"]), top["log2FC"]])
+    fig = go.Figure(go.Heatmap(
+        z=z.T,
+        x=top["symbol"].tolist(),
+        y=["-log10(p)", "Log2FC"],
+        colorscale="RdBu", reversescale=True, zmid=0,
+        hovertemplate="Gene: %{x}<br>Metric: %{y}<br>Value: %{z:.3f}<extra></extra>",
+        colorbar=dict(title="Value", thickness=12),
+    ))
+    fig.update_layout(
+        template="simple_white",
+        title=f"Top {len(top)} DE Genes — Heatmap",
+        xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
+        height=320, margin=dict(l=80, r=10, t=45, b=80),
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3-D PCA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_pca_3d(res: dict) -> go.Figure:
+    clusters = np.array(res["clusters"])
+    genes    = res["genes"]
+    var      = res["explained_variance"]
+    lfc      = res.get("lfc", [0] * len(genes))
+
+    fig = go.Figure()
+    for k in range(res["n_clusters"]):
+        m = clusters == k
+        fig.add_trace(go.Scatter3d(
+            x=np.array(res["pc1"])[m],
+            y=np.array(res["pc2"])[m],
+            z=np.array(res["pc3"])[m],
+            mode="markers",
+            name=f"Cluster {k + 1}",
+            marker=dict(size=6, color=CLUSTER_PAL[k % len(CLUSTER_PAL)], opacity=0.87),
+            text=[g for g, b in zip(genes, m) if b],
+            hovertemplate="<b>%{text}</b><br>PC1 %{x:.3f}  PC2 %{y:.3f}  PC3 %{z:.3f}<extra></extra>",
+        ))
+    fig.update_layout(
+        template="simple_white", height=520,
+        title=dict(
+            text=(f"3D PCA Projection"
+                  f"<br><span style='font-size:11px;color:#888;'>"
+                  f"PC1 {var[0]:.1f}%  PC2 {var[1]:.1f}%  PC3 {var[2]:.1f}%"
+                  f"  |  {res['n_clusters']} clusters  {len(genes)} genes</span>"),
+            font=dict(size=14),
         ),
-        hovertemplate='Gene: %{y}<br>Meta-Score: %{x:.1f}<extra></extra>'
+        scene=dict(
+            xaxis_title=f"PC1 ({var[0]:.1f}%)",
+            yaxis_title=f"PC2 ({var[1]:.1f}%)",
+            zaxis_title=f"PC3 ({var[2]:.1f}%)",
+        ),
+        legend=dict(title="Cluster"),
+        margin=dict(l=0, r=0, t=80, b=0),
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gene Network
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_network_graph(network_data: dict) -> go.Figure:
+    G = network_data.get("graph")
+    if G is None or G.number_of_nodes() < 3:
+        return blank("Not enough correlated genes at current threshold.")
+
+    pos     = nx.spring_layout(G, seed=42, k=2.5)
+    lfc_map = network_data.get("lfc_values", {})
+    modules = network_data.get("labels", {})
+
+    # Color edges by correlation sign
+    edge_pos = []
+    edge_neg = []
+    for u, v, data in G.edges(data=True):
+        w = data.get("weight", 1.0)
+        seg = [pos[u][0], pos[v][0], None], [pos[u][1], pos[v][1], None]
+        if w >= 0:
+            edge_pos.extend(zip(*seg))
+        else:
+            edge_neg.extend(zip(*seg))
+
+    traces = []
+    if edge_pos:
+        ex, ey = [x for x, _ in edge_pos], [y for _, y in edge_pos]
+        traces.append(go.Scatter(x=ex, y=ey, mode="lines",
+                                 line=dict(width=0.8, color="#e74c3c"),
+                                 hoverinfo="none", showlegend=True, name="Corr +"))
+    if edge_neg:
+        ex, ey = [x for x, _ in edge_neg], [y for _, y in edge_neg]
+        traces.append(go.Scatter(x=ex, y=ey, mode="lines",
+                                 line=dict(width=0.8, color="#3498db"),
+                                 hoverinfo="none", showlegend=True, name="Corr −"))
+
+    node_x = [pos[n][0] for n in G.nodes()]
+    node_y = [pos[n][1] for n in G.nodes()]
+    node_lfc   = [lfc_map.get(n, 0) for n in G.nodes()]
+    node_mod   = [str(modules.get(n, 0)) for n in G.nodes()]
+    node_deg   = [G.degree(n) for n in G.nodes()]
+    traces.append(go.Scatter(
+        x=node_x, y=node_y,
+        mode="markers+text",
+        text=list(G.nodes()),
+        textposition="top center",
+        textfont=dict(size=9),
+        marker=dict(
+            size=[max(8, 6 + d) for d in node_deg],
+            color=node_lfc,
+            colorscale="RdBu", reversescale=True,
+            showscale=True,
+            colorbar=dict(title="Log2FC", thickness=12),
+            line=dict(width=1, color="#fff"),
+        ),
+        customdata=np.column_stack([node_mod, node_deg]),
+        hovertemplate=(
+            "<b>%{text}</b><br>Module: %{customdata[0]}<br>"
+            "Degree: %{customdata[1]}<extra></extra>"
+        ),
+        showlegend=False,
     ))
 
+    fig = go.Figure(data=traces)
     fig.update_layout(
-        template='simple_white',
-        title='Top Genes by Meta-Score',
-        xaxis_title='Meta-Score',
-        yaxis_title='',
-        margin=dict(l=160, r=40, t=50, b=40),
-        height=380
+        template="simple_white",
+        title=f"Co-expression Network  ({G.number_of_nodes()} nodes · {G.number_of_edges()} edges)",
+        showlegend=True,
+        legend=dict(font=dict(size=10)),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        margin=dict(l=20, r=20, t=55, b=20),
     )
     return fig

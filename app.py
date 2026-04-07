@@ -1,2078 +1,1234 @@
-import dash
-from dash import dcc, html, Input, Output, State, dash_table, ctx, callback, ALL
-import dash_bootstrap_components as dbc
-import pandas as pd
-import numpy as np
-import io, base64, logging, json, hashlib, time
+"""
+Apex Bioinformatics Platform
+=============================
+Multi-user RNA-seq analysis dashboard.
+Safe for ≥ 5 concurrent lab users (Gunicorn / Dash).
+
+Unique features not available in other free tools:
+  • Interactive lasso → real-time multi-DB pathway enrichment
+  • Drug Target Landscape (FDA drug overlay on DE results)
+  • Cancer Gene Census overlay on Volcano (oncogenes ★ / TSGs ◆)
+  • Pathway Crosstalk heatmap (Jaccard gene overlap between pathways)
+  • Biomarker Priority Score (clinical + statistical composite)
+  • Auto-Insights — rule-based biological narrative
+  • 3-D PCA with K-means clustering
+  • WGCNA-lite co-expression network
+  • GSEA pre-ranked (per-call temp dir — worker-safe)
+  • PDF report with all panels
+"""
+
+import base64
+import io
+import logging
 from datetime import datetime
-from collections import Counter
+
+import dash
+import dash_bootstrap_components as dbc
+import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
-from plotly.offline import plot
-import plotly.io as pio
+from dash import Input, Output, State, ctx, dash_table, dcc, html
 
-# Configure Plotly to serve assets locally and avoid external CDN issues
-pio.templates.default = "plotly"
-plotly_config = {
-    'displayModeBar': True,
-    'displaylogo': False,
-    'modeBarButtonsToRemove': ['pan2d', 'lasso2d', 'select2d'],
-    'responsive': True,
-    'config': {
-        'mathjax': None,  # Disable MathJax
-        'katex': None     # Disable KaTeX
-    }
-}
-
-# Configure Plotly to not use external CDN and disable math rendering
-import plotly
-plotly.io.renderers.default = 'browser'
-
-# Disable KaTeX math rendering to avoid external CDN calls
-plotly_config['staticPlot'] = True
-
-from modules.plots import (
-    create_volcano_plot,
-    create_heatmap,
-    create_pathway_enrichment,
-    create_3d_pca,
-    create_gsea_bar,
-    create_network_graph,
-    create_meta_score_bar
-)
+# ── local modules ─────────────────────────────────────────────────────────────
 from modules.analysis import (
+    compute_biomarker_score,
+    compute_meta_score,
+    compute_pathway_crosstalk,
+    generate_insights,
     run_gsea_preranked,
     run_pca_3d,
     run_wgcna_lite,
-    compute_meta_score
 )
 from modules.bio_context import fetch_gene_info
-from modules.export import generate_pdf_report, compute_data_integrity_score
-from modules.session_manager import get_session_manager
-from modules.advanced_export import get_exporter
-from modules.data_validator import DataValidator, validate_deg_data
-from modules.visualizer_pro import create_gsea_plot
-from modules.progress_tracker import get_progress_tracker, create_upload_progress_tracker
-from modules.batch_analysis import get_batch_analyzer
+from modules.pathway import EnrichmentAnalyzer, MultiDatabaseEnrichment
+from modules.plots import (
+    blank,
+    create_biomarker_score_chart,
+    create_drug_target_chart,
+    create_drug_type_donut,
+    create_lfc_dist,
+    create_ma_plot,
+    create_meta_score_bar,
+    create_network_graph,
+    create_pathway_bar,
+    create_pathway_bubble,
+    create_pathway_crosstalk,
+    create_pca_3d,
+    create_pval_hist,
+    create_rank_metric,
+    create_top_heatmap,
+    create_volcano_plot,
+)
+from modules.reports import generate_pdf_report
+from data.gene_annotations import get_drug_targets, get_cancer_gene_info
 
-# ── CONFIGURATION ────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-MIN_GENES = 3
-MAX_GENES = 50000
-REQUIRED_COLUMNS = ['gene_symbol', 'log2_fold_change', 'adjusted_p_value']
+# ─────────────────────────────────────────────────────────────────────────────
+# App initialisation
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── ENHANCED DEMO DATA WITH REALISTIC DISTRIBUTIONS ─────────────────────────
+app = dash.Dash(
+    __name__,
+    external_stylesheets=[
+        dbc.themes.BOOTSTRAP,
+        "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css",
+    ],
+    suppress_callback_exceptions=True,
+    title="Apex Bioinformatics",
+    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
+)
+server = app.server   # Gunicorn entry point
 
-np.random.seed(42)
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Generate more realistic DEG data with proper statistical distributions
-def generate_demo_data(n_genes=5000):
-    """Generate realistic RNA-seq DEG data with proper statistical properties"""
+DEMO_CSV   = "sample_deg_data.csv"
+RICH_CSV   = "data/demo_dge.csv"
+HOUSEKEEP  = {"ACTB", "GAPDH", "B2M", "RPLP0", "HPRT1", "GUSB", "TBP"}
 
-    # Base expression levels (log-normal distribution)
-    base_expr = np.random.lognormal(0, 1.5, n_genes)
+DB_OPTIONS = [
+    {"label": "KEGG Pathways",         "value": "kegg"},
+    {"label": "GO Biological Process", "value": "go_bp"},
+    {"label": "Reactome",              "value": "reactome"},
+    {"label": "All Databases",         "value": "all"},
+]
 
-    # True differentially expressed genes (20% of total)
-    n_de = int(0.2 * n_genes)
-    de_indices = np.random.choice(n_genes, n_de, replace=False)
+# Module-level enrichment analyzer cache (per-worker, stateless analyzers)
+# Keyed by db-name; thread-safe because analyzers have no mutable state.
+_ENR_ANALYZERS: dict = {}
 
-    # Generate realistic fold changes
-    lfc_true = np.zeros(n_genes)
-    lfc_true[de_indices] = np.random.normal(0, 1.5, n_de)
-    lfc_true[de_indices] = np.clip(lfc_true[de_indices], -6, 6)
 
-    # Add measurement noise
-    lfc_observed = lfc_true + np.random.normal(0, 0.3, n_genes)
+def _get_analyzer(db_choice: str):
+    if db_choice not in _ENR_ANALYZERS:
+        if db_choice == "all":
+            _ENR_ANALYZERS["all"] = MultiDatabaseEnrichment(["kegg", "go_bp", "reactome"])
+        else:
+            _ENR_ANALYZERS[db_choice] = EnrichmentAnalyzer(db_choice)
+    return _ENR_ANALYZERS[db_choice]
 
-    # Generate p-values with proper null distribution
-    # For truly DE genes, p-values follow beta distribution
-    # For null genes, p-values are uniform
-    pvals = np.random.uniform(0, 1, n_genes)
 
-    # Make truly DE genes have lower p-values
-    effect_sizes = np.abs(lfc_true)
-    for i, effect in enumerate(effect_sizes):
-        if effect > 0.5:  # Significant effect
-            # Beta distribution for significant p-values
-            pvals[i] = np.random.beta(0.5, effect * 2)
+# ─────────────────────────────────────────────────────────────────────────────
+# Data helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # Apply multiple testing correction (BH method approximation)
-    sorted_indices = np.argsort(pvals)
-    padj = pvals.copy()
-    for i, idx in enumerate(sorted_indices):
-        padj[idx] = min(1.0, pvals[idx] * n_genes / (i + 1))
+def _normalise(df: pd.DataFrame) -> pd.DataFrame:
+    _SYMBOL_EXACT = {"gene_name","gene","genename","hgnc_symbol","symbol","id",
+                     "gene_id","gene_symbol","geneid","name"}
+    _LFC_EXACT    = {"log2foldchange","log2fc","lfc","foldchange","log2_fold_change",
+                     "log2_fc","fold_change"}
+    _PADJ_EXACT   = {"padj","adj.p.val","adj_p_value","fdr","p_adj","p.adj","bh",
+                     "p_value_adj","adjusted_pvalue","adj_pval","adjusted_p_value",
+                     "qvalue"}
+    _PVAL_EXACT   = {"pvalue","p.value","p_value","pval","nominal_p"}
+    _BASE_EXACT   = {"basemean","base_mean","mean_expr","avgexpr","averageexpression",
+                     "mean_count"}
 
-    # Generate gene symbols (mix of real and synthetic)
-    real_genes = [
-        'TNF', 'IL6', 'IL1B', 'CXCL8', 'CCL2', 'MYD88', 'NFKB1', 'RELA', 'STAT1', 'STAT3',
-        'IRF1', 'IRF3', 'IRF7', 'TLR4', 'IRAK1', 'TRAF6', 'MAPK14', 'JUN', 'FOS', 'EGR1',
-        'PTGS2', 'MMP9', 'VEGFA', 'HIF1A', 'TP53', 'CDKN1A', 'BCL2', 'MCL1', 'BAX', 'CASP3',
-        'IFNG', 'IFNB1', 'MX1', 'OAS1', 'ISG15', 'IFIT1', 'DDX58', 'MAVS', 'STING1', 'CGAS',
-        'GAPDH', 'ACTB', 'B2M', 'HLA-A', 'HLA-DRA', 'HLA-DRB1', 'CD74', 'CIITA', 'TAP1', 'TAPBP'
-    ]
+    # Pass 1: exact match
+    rn = {}
+    for c in df.columns:
+        cl = c.lower().strip().replace(" ", "_")
+        if   cl in _SYMBOL_EXACT and "symbol" not in rn.values(): rn[c] = "symbol"
+        elif cl in _LFC_EXACT    and "log2FC" not in rn.values(): rn[c] = "log2FC"
+        elif cl in _PADJ_EXACT   and "padj"   not in rn.values(): rn[c] = "padj"
+        elif cl in _PVAL_EXACT   and "pvalue" not in rn.values(): rn[c] = "pvalue"
+        elif cl in _BASE_EXACT   and "baseMean" not in rn.values(): rn[c] = "baseMean"
 
-    synthetic_genes = [f'GENE_{i:04d}' for i in range(len(real_genes), n_genes)]
-    gene_symbols = real_genes + synthetic_genes
+    # Pass 2: substring match for compound names like "diffexp_log2fc_NORMAL-vs-DISEASE"
+    for c in df.columns:
+        if c in rn:
+            continue
+        cl = c.lower().replace("-", "_")
+        if "symbol" not in rn.values():
+            if any(p in cl for p in ("gene_symbol","gene_name","hgnc")):
+                rn[c] = "symbol"
+        if "log2FC" not in rn.values():
+            if any(p in cl for p in ("log2fc","log2_fc","log2fold")):
+                rn[c] = "log2FC"
+        if "padj" not in rn.values():
+            if any(p in cl for p in ("qvalue","padj","fdr","adj_p","p_adj")):
+                rn[c] = "padj"
 
+    df = df.rename(columns=rn)
+    if not {"symbol", "log2FC", "padj"}.issubset(df.columns):
+        cols = df.columns.tolist()
+        df   = df.rename(columns={cols[0]: "symbol", cols[1]: "log2FC", cols[2]: "padj"})
+    df["log2FC"] = pd.to_numeric(df["log2FC"], errors="coerce")
+    # DESeq2 / edgeR output regularly has NA padj for low-count genes (independent
+    # filtering). Coerce those to 1.0 (non-significant) so NO genes are dropped.
+    padj_raw = pd.to_numeric(df["padj"], errors="coerce")
+    df["padj"] = padj_raw.fillna(1.0).clip(lower=1e-300, upper=1.0)
+    # Only drop rows where log2FC is truly missing (all-zero-count genes, uninformative)
+    return df.dropna(subset=["log2FC"]).reset_index(drop=True)
+
+
+def _load_demo() -> pd.DataFrame:
+    for path in (RICH_CSV, DEMO_CSV):
+        try:
+            return _normalise(pd.read_csv(path))
+        except Exception:
+            continue
+    # Fallback: built-in 30-gene panel covering diverse biology
     return pd.DataFrame({
-        'symbol': gene_symbols,
-        'log2FC': lfc_observed,
-        'padj': padj,
-        'pvalue': pvals,
-        'baseMean': base_expr
+        "symbol": [
+            "TNF","IL6","TP53","MYC","EGFR","BRCA1","PTEN","VEGFA",
+            "CDK4","STAT3","CCND1","E2F1","RB1","HIF1A","MMP9",
+            "CASP3","BAX","CDKN1A","VHL","ESR1","ERBB2","ALK","KRAS",
+            "BCL2","MTOR","JAK2","BRAF","NOTCH1","IDH1","FLT3",
+        ],
+        "log2FC": [
+            4.0, 3.8, 2.5, 3.1, 1.9, -2.8, -2.5, 1.2, 1.6, 1.7,
+            1.5, 2.4, -3.1, 2.3, 3.5, -2.6, -3.0, 2.1, -3.4, -2.7,
+            2.8, 1.3, 2.2, -1.8, 1.4, 2.0, 2.6, 1.1, 1.8, 2.3,
+        ],
+        "padj": [
+            5e-6, 3e-4, 1e-5, 1.2e-7, 2e-3, 2e-4, 9e-4, 4e-2, 9e-3, 1e-3,
+            8e-3, 4e-4, 7e-5, 7e-4, 8e-5, 6e-4, 1e-4, 5e-5, 3e-5, 3e-4,
+            5e-7, 1e-2, 3e-4, 8e-3, 5e-3, 4e-4, 2e-3, 2e-2, 1e-2, 5e-4,
+        ],
     })
 
-DEMO_DF = generate_demo_data(2000)
-DEMO_DF['pvalue'] = DEMO_DF['padj']
-DEMO_DF['baseMean'] = np.random.lognormal(6, 2, len(DEMO_DF))
 
-# ── LOGGING & MONITORING ────────────────────────────────────────────────────
+def _s2df(data) -> pd.DataFrame:
+    """Reconstruct DataFrame from dcc.Store records. Never silently falls back
+    to demo data — returns an empty (but schema-valid) DataFrame so callers can
+    detect the no-data state without being misled by 50-gene demo values."""
+    if data:
+        try:
+            return pd.DataFrame(data)
+        except Exception:
+            pass
+    return pd.DataFrame(columns=["symbol", "log2FC", "padj"])
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('app.log')
-    ]
-)
-logger = logging.getLogger(__name__)
 
-# ── UTILITY FUNCTIONS ───────────────────────────────────────────────────────
+def _run_enrichment(
+    sig_genes: list,
+    db_choice: str,
+    gene_lfc_map: dict | None = None,
+    gene_nlp_map: dict | None = None,
+) -> pd.DataFrame:
+    """
+    Run pathway enrichment and attach activation z-scores + effect-weighted
+    scores when LFC/NLP maps are supplied.
 
-def create_session_id():
-    """Generate unique session identifier"""
-    return hashlib.md5(f"{time.time()}_{np.random.randint(1000000)}".encode()).hexdigest()[:8]
-
-# ── APP INIT ─────────────────────────────────────────────────────────────────
-
-app = dash.Dash(__name__,
-                external_stylesheets=[],
-                external_scripts=[],
-                suppress_callback_exceptions=True,
-                serve_locally=True,  # Serve assets locally instead of CDN
-                meta_tags=[
-                    {"name": "viewport", "content": "width=device-width, initial-scale=1"},
-                    {"name": "description", "content": "Advanced RNA-seq Pathway Analysis Tool"},
-                    {"property": "og:title", "content": "RNA-seq Pathway Visualizer"},
-                    {"property": "og:description", "content": "Interactive differential expression and pathway enrichment analysis"},
-                    {"property": "og:type", "content": "website"}
-                ])
-
-server = app.server
-
-@server.after_request
-def set_security_headers(response):
-    # Allow cross-origin access for Hugging Face Spaces
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    
-    # Only list currently recognised Permissions-Policy features to silence
-    # "Unrecognized feature" browser warnings caused by deprecated names.
-    response.headers['Permissions-Policy'] = (
-        'camera=(), microphone=(), geolocation=(), payment=(), '
-        'accelerometer=(), gyroscope=(), magnetometer=(), '
-        'usb=(), bluetooth=()'
-    )
-    # Allow cross-origin storage so Edge Tracking Prevention doesn't block
-    # the Dash session cookie when the app is embedded in an iframe.
-    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin-allow-popups'
-    response.headers['Cross-Origin-Embedder-Policy'] = 'credentialless'
-    
-    # Prevent external script injection
-    response.headers['Content-Security-Policy'] = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data: https:; "
-        "connect-src 'self' https://plotly.com;"
-    )
-    return response
-
-# Enhanced CSS with accessibility and modern styling
-app.index_string = app.index_string.replace(
-    '</head>',
-    '<style>'
-    '.js-plotly-plot .plotly .modebar{z-index:1001!important;pointer-events:all!important;}'
-    '.upload-zone:hover{background:#f0f7ff!important;border-color:#4dabf7!important;}'
-    '.upload-zone.dragover{background:#e3f2fd!important;border-color:#2196f3!important;}'
-    '::-webkit-scrollbar {width: 6px;height: 6px;}'
-    '::-webkit-scrollbar-track {background: #f1f1f1;border-radius: 3px;}'
-    '::-webkit-scrollbar-thumb {background: #b0bec5;border-radius: 3px;}'
-    '::-webkit-scrollbar-thumb:hover {background: #78909c;}'
-    '.quality-indicator {font-size: 11px; padding: 2px 6px; border-radius: 3px;}'
-    '.quality-good {background: #e8f5e8; color: #2e7d32;}'
-    '.quality-warning {background: #fff3e0; color: #ef6c00;}'
-    '.quality-error {background: #ffebee; color: #c62828;}'
-    '.help-tooltip {cursor: help; border-bottom: 1px dotted #666;}'
-    '.export-btn {transition: all 0.2s ease;}'
-    '.export-btn:hover {transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.2);}'
-    '@media (max-width: 768px) {.card-body {padding: 1rem;}}'
-    '@media (prefers-reduced-motion: reduce) {* {animation-duration: 0.01ms !important;}}'
-    '</style></head>'
-)
-
-# ── LAYOUT ───────────────────────────────────────────────────────────────────
-
-app.layout = dbc.Container([
-
-    # ── HEADER ──────────────────────────────────────────
-    dbc.Row([dbc.Col([
-        html.Div([
-            html.H2("🧬 Advanced RNA-Seq Pathway Visualizer",
-                    style={'color':'white','marginBottom':'4px',
-                           'fontSize':'20px','fontWeight':'700'}),
-            html.P("Interactive Differential Expression ↔ Pathway Analysis  |  "
-                   "Industry-Grade Analysis Suite",
-                   style={'color':'rgba(255,255,255,0.82)',
-                          'marginBottom':0,'fontSize':'11px'}),
-            html.Div([
-                html.Span("v3.2", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'}),
-                html.Span(" • ", style={'margin':'0 8px','color':'rgba(255,255,255,0.4)'}),
-                html.Span("GSEA Curves • Top Hits • Real-time validation", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'})
-            ], style={'marginTop':'4px'})
-        ], style={
-            'background':'linear-gradient(135deg,#1a237e,#1565c0,#0277bd)',
-            'padding':'16px 24px',
-            'borderRadius':'8px',
-            'marginBottom':'12px',
-            'position':'relative',
-            'overflow':'hidden'
-        })
-    ], width=12)]),
-
-    # ── ALERT BANNER ────────────────────────────────────
-    dbc.Row([dbc.Col([
-        dbc.Alert(id='main-alert', is_open=False, dismissable=True,
-                  duration=8000, style={'fontSize': '13px'})
-    ], width=12)]),
-
-    # ── UPLOAD VALIDATION ALERT ─────────────────────────
-    dbc.Row([dbc.Col([
-        dbc.Alert(id='upload-validation-alert', is_open=False, dismissable=True,
-                  duration=10000, style={'fontSize': '12px'})
-    ], width=12)]),
-
-    dbc.Row([dbc.Col([
-        html.Div(id='data-quality-panel', style={'marginBottom':'12px'})
-    ], width=12)]),
-
-    # ── PROGRESS INDICATOR ──────────────────────────────
-    dbc.Row([dbc.Col([
-        dcc.Loading(
-            type='default',
-            color='#1565c0',
-            children=html.Div(id='progress-indicator-panel', style={
-                'marginBottom': '12px',
-                'padding': '8px',
-                'backgroundColor': '#f5f5f5',
-                'borderRadius': '4px',
-                'minHeight': '0px'
-            })
+    padj_threshold: 0.05 (v3.0, tightened from 0.5) — returns only
+    statistically reliable pathways by default.  Downstream views still
+    show all returned rows; users see fewer but higher-confidence results.
+    """
+    if not sig_genes:
+        return pd.DataFrame()
+    try:
+        analyzer  = _get_analyzer(db_choice)
+        lfc_map   = gene_lfc_map or {}
+        nlp_map   = gene_nlp_map or {}
+        if db_choice == "all":
+            return analyzer.run_multi_enrichment(
+                sig_genes,
+                padj_threshold=0.05,
+                gene_lfc_map=lfc_map,
+                gene_nlp_map=nlp_map,
+            )
+        return analyzer.run_enrichment(
+            sig_genes,
+            padj_threshold=0.05,
+            gene_lfc_map=lfc_map,
+            gene_nlp_map=nlp_map,
         )
-    ], width=12)]),
+    except Exception as e:
+        log.warning(f"Enrichment ({db_choice}): {e}")
+        return pd.DataFrame()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Layout helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # ── ONBOARDING & HELP ───────────────────────────────
-    dbc.Row([dbc.Col([
-        dbc.Collapse([
-            dbc.Alert([
-                html.Div([
-                    html.H6("🚀 Quick Start Guide", style={'marginBottom':'8px','color':'#2e7d32'}),
-                    html.Div([
-                        html.Div([
-                            html.Span("1️⃣", style={'fontSize':'16px','marginRight':'8px'}),
-                            html.Strong("Load Data: "),
-                            "Upload your DEG CSV or click 'Load Demo Data'"
-                        ], style={'marginBottom':'4px'}),
-                        html.Div([
-                            html.Span("2️⃣", style={'fontSize':'16px','marginRight':'8px'}),
-                            html.Strong("Explore: "),
-                            "Use lasso selection on volcano plot to select genes"
-                        ], style={'marginBottom':'4px'}),
-                        html.Div([
-                            html.Span("3️⃣", style={'fontSize':'16px','marginRight':'8px'}),
-                            html.Strong("Analyze: "),
-                            "Pathway enrichment runs automatically"
-                        ], style={'marginBottom':'4px'}),
-                        html.Div([
-                            html.Span("4️⃣", style={'fontSize':'16px','marginRight':'8px'}),
-                            html.Strong("Navigate: "),
-                            "Click pathway bubbles to highlight genes"
-                        ], style={'marginBottom':'4px'}),
-                    ], style={'fontSize':'12px','lineHeight':'1.4'})
-                ], style={'display':'flex','gap':'16px'})
-            ], color="success", style={'fontSize': '12px', 'padding': '12px 16px'})
-        ], id='help-panel', is_open=True)
-    ], width=12)]),
+def _section_head(icon: str, title: str, subtitle: str = "") -> html.Div:
+    return html.Div([
+        html.Span(icon + " ", style={"color": "#f39c12"}),
+        html.Strong(title, style={"fontSize": 11, "color": "#1a5276"}),
+        *([] if not subtitle else [
+            html.Br(),
+            html.Small(subtitle, className="text-muted"),
+        ]),
+    ], className="px-2 pt-2 pb-1 border-bottom mb-2")
 
-    # ── BATCH MODE SECTION ──────────────────────────────
-    dbc.Row([dbc.Col([
-        dbc.Collapse([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H6("📦 Batch Processing Mode", style={'marginBottom': '12px', 'color': '#1a237e'}),
-                    html.P("Upload and analyze multiple DEG files simultaneously. Compare gene signatures across samples.",
-                          style={'fontSize': '12px', 'marginBottom': '12px', 'color': '#666'}),
-                    html.Div([
-                        html.Div([
-                            html.Label("Upload Multiple Files", style={'fontWeight': '600', 'fontSize': '12px', 'marginBottom': '6px', 'display': 'block'}),
-                            dcc.Upload(
-                                id='batch-file-upload',
-                                children=html.Div([
-                                    html.I(className="fas fa-folder-open", style={'fontSize': '20px', 'color': '#666', 'display': 'block', 'marginBottom': '6px'}),
-                                    'Drag & Drop or Select Multiple CSV Files'
-                                ]),
-                                style={
-                                    'width': '100%',
-                                    'height': '80px',
-                                    'lineHeight': '80px',
-                                    'borderWidth': '2px',
-                                    'borderStyle': 'dashed',
-                                    'borderRadius': '6px',
-                                    'textAlign': 'center',
-                                    'borderColor': '#adb5bd',
-                                    'fontSize': '12px',
-                                    'cursor': 'pointer',
-                                    'backgroundColor': '#f8f9fa'
-                                },
-                                max_size=50*1024*1024,  # 50MB total for batch
-                                multiple=True
-                            ),
-                        ], style={'flexGrow': '1', 'marginRight': '12px'}),
-                        html.Div([
-                            dbc.Button([
-                                html.I(className="fas fa-cog", style={'marginRight': '6px'}),
-                                "Process Batch"
-                            ], id='process-batch-btn', color="primary", className='mt-4', style={'width': '100%'}),
-                            html.Div(id='batch-process-status', style={'marginTop': '8px', 'fontSize': '11px'})
-                        ], style={'min Width': '150px'})
-                    ], style={'display': 'flex', 'gap': '12px'})
-                ])
-            ], className="shadow-sm")
-        ], id='batch-mode-section', is_open=False)
-    ], width=12)]),
 
-    # ── PROFESSIONAL COCKPIT: Sidebar (col-3) + Main Content (col-9) ─────────
-    dbc.Row([
+def _enr_table(enr: pd.DataFrame) -> html.Div:
+    if enr is None or enr.empty:
+        return html.P("No significant pathways.", className="text-muted small ps-1")
+    cols = [c for c in ["pathway", "database", "overlap_count", "pathway_size",
+                         "adjusted_p_value", "genes"]
+            if c in enr.columns]
+    d = enr[cols].head(20).copy()
+    d["adjusted_p_value"] = d["adjusted_p_value"].map("{:.2e}".format)
+    return dash_table.DataTable(
+        data=d.to_dict("records"),
+        columns=[{"name": c.replace("_", " ").title(), "id": c} for c in cols],
+        style_table={"overflowX": "auto", "maxHeight": "320px", "overflowY": "auto"},
+        style_cell={"fontSize": 11, "padding": "3px 8px", "textAlign": "left",
+                    "maxWidth": "200px", "overflow": "hidden", "textOverflow": "ellipsis"},
+        style_header={"backgroundColor": "#1a5276", "color": "white",
+                      "fontWeight": "bold", "fontSize": 11},
+        style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#f4f6f7"}],
+        page_size=10,
+        tooltip_delay=0,
+        tooltip_duration=None,
+        tooltip_data=[
+            {c: {"value": str(row[c]), "type": "markdown"} for c in cols}
+            for _, row in d.iterrows()
+        ],
+    )
 
-        # ── LEFT SIDEBAR (unified control panel) ────────────────────────────────
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader(
-                    html.Div([
-                        html.I(className="fas fa-dna", style={'marginRight': '8px'}),
-                        html.Span("Analysis Controls", style={'fontWeight': '700', 'fontSize': '14px'})
-                    ], style={'color': 'white'}),
-                    style={'background': 'linear-gradient(135deg,#1a237e,#1565c0)', 'padding': '10px 14px'}
-                ),
-                dbc.CardBody([
 
-                    # ── Upload ────────────────────────────────
-                    html.Label([
-                        html.I(className="fas fa-upload", style={'marginRight': '5px'}),
-                        "Upload DEG CSV"
-                    ], style={'fontWeight': '600', 'fontSize': '12px',
-                               'marginBottom': '4px', 'display': 'block'}),
-                    dcc.Upload(
-                        id='main-upload-comp',
-                        children=html.Div([
-                            html.I(className="fas fa-cloud-upload-alt",
-                                   style={'fontSize': '20px', 'color': '#6c757d',
-                                          'display': 'block', 'marginBottom': '4px'}),
-                            html.Span('Drop or ', style={'fontSize': '11px'}),
-                            html.A('Select File',
-                                   style={'color': '#007bff', 'fontSize': '11px',
-                                          'textDecoration': 'underline'})
-                        ]),
-                        style={
-                            'width': '100%', 'height': '64px', 'lineHeight': '64px',
-                            'borderWidth': '2px', 'borderStyle': 'dashed',
-                            'borderRadius': '8px', 'textAlign': 'center',
-                            'borderColor': '#adb5bd', 'fontSize': '11px',
-                            'cursor': 'pointer', 'backgroundColor': '#f8f9fa',
-                            'transition': 'all 0.2s ease'
-                        },
-                        max_size=MAX_FILE_SIZE,
-                        multiple=False
-                    ),
-                    html.Small("Max 10MB • CSV format",
-                               style={'color': '#6c757d', 'fontSize': '10px'}),
-                    dbc.Alert(id='upload-alert', is_open=False, dismissable=True,
-                              className="mt-1 mb-0",
-                              style={'fontSize': '11px', 'padding': '4px 8px'}),
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────────────────────────────────────
 
-                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
-
-                    # ── Quick Start ────────────────────────────
-                    dbc.Button([
-                        html.I(className="fas fa-play", style={'marginRight': '6px'}),
-                        "Load Demo Data"
-                    ], id='load-demo-btn', color="success", size="sm",
-                       className="w-100 mb-1"),
-                    dbc.Button([
-                        html.I(className="fas fa-layer-group", style={'marginRight': '6px'}),
-                        "Batch Mode"
-                    ], id='toggle-batch-mode-btn', color="outline-secondary",
-                       size="sm", className="w-100"),
-
-                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
-
-                    # ── Thresholds ────────────────────────────
-                    html.Label([
-                        "🔬 Log2FC Threshold ",
-                        html.I(className="fas fa-info-circle help-tooltip",
-                               title="Minimum absolute fold change for significance")
-                    ], style={'fontWeight': '600', 'fontSize': '12px',
-                               'marginBottom': '4px', 'display': 'block'}),
-                    dcc.Slider(id='lfc-thresh-slider', min=0.0, max=3.0, step=0.5,
-                               value=1.0,
-                               marks={0: '0', 0.5: '0.5', 1: '1',
-                                      1.5: '1.5', 2: '2', 3: '3'},
-                               tooltip={'placement': 'bottom', 'always_visible': True}),
-
-                    html.Div(style={'marginTop': '22px'}),
-
-                    html.Label([
-                        "📊 Significance (padj) ",
-                        html.I(className="fas fa-info-circle help-tooltip",
-                               title="Adjusted p-value threshold (BH correction)")
-                    ], htmlFor='padj-thresh-dd',
-                       style={'fontWeight': '600', 'fontSize': '12px',
-                               'marginBottom': '4px', 'display': 'block'}),
-                    dcc.Dropdown(id='padj-thresh-dd',
-                                 options=[
-                                     {'label': '0.001 (Stringent)', 'value': 0.001},
-                                     {'label': '0.01 (Moderate)',   'value': 0.01},
-                                     {'label': '0.05 (Standard)',   'value': 0.05},
-                                     {'label': '0.1 (Relaxed)',     'value': 0.1}
-                                 ],
-                                 value=0.05, clearable=False,
-                                 style={'fontSize': '12px'}),
-
-                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
-
-                    # ── Analysis Options ──────────────────────
-                    html.Label("Analysis Options",
-                               style={'fontWeight': '600', 'fontSize': '12px',
-                                      'marginBottom': '4px', 'display': 'block'}),
-                    dbc.Checklist(
-                        id='analysis-options',
-                        options=[
-                            {"label": "Show gene labels",       "value": "show_labels"},
-                            {"label": "Auto-scale plots",       "value": "auto_scale"},
-                            {"label": "Statistical validation", "value": "stat_validation"}
-                        ],
-                        value=["show_labels", "stat_validation"],
-                        style={'fontSize': '11px'}
-                    ),
-
-                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
-
-                    # ── Actions ───────────────────────────────
-                    html.Label("Actions",
-                               style={'fontWeight': '600', 'fontSize': '12px',
-                                      'marginBottom': '6px', 'display': 'block'}),
-                    dbc.Button([
-                        html.I(className="fas fa-redo", style={'marginRight': '4px'}),
-                        "Reset"
-                    ], id='reset-btn', color="outline-secondary",
-                       size="sm", className="w-100 mb-1"),
-                    dbc.Button([
-                        html.I(className="fas fa-download", style={'marginRight': '4px'}),
-                        "Export JSON"
-                    ], id='export-btn', color="outline-success",
-                       size="sm", className="export-btn w-100 mb-1"),
-
-                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
-
-                    # ── Session ───────────────────────────────
-                    html.Label("Session",
-                               style={'fontWeight': '600', 'fontSize': '12px',
-                                      'marginBottom': '6px', 'display': 'block'}),
-                    dbc.Button([
-                        html.I(className="fas fa-save", style={'marginRight': '4px'}),
-                        "Save Session"
-                    ], id='save-session-btn', color="outline-info",
-                       size="sm", className="w-100 mb-1"),
-                    dbc.Button([
-                        html.I(className="fas fa-folder-open", style={'marginRight': '4px'}),
-                        "Load Session"
-                    ], id='load-session-btn', color="outline-info",
-                       size="sm", className="w-100 mb-2"),
-
-                    html.P([
-                        html.I(className="fas fa-hand-pointer",
-                               style={'marginRight': '5px', 'color': '#1565c0'}),
-                        "Lasso-select genes on the volcano to run enrichment."
-                    ], style={'fontSize': '10px', 'color': '#888',
-                               'lineHeight': '1.5', 'marginBottom': '0'}),
-
-                ], style={'padding': '12px', 'maxHeight': 'calc(100vh - 120px)',
-                          'overflowY': 'auto'})
-            ], className="shadow-sm", style={'position': 'sticky', 'top': '12px'})
-        ], xs=12, md=3, style={'marginBottom': '12px'}),
-
-        # ── MAIN CONTENT ─────────────────────────────────────────────────────
-        dbc.Col([
-            dbc.Row([
-
-                # Volcano + Top Hits + Heatmap
-                dbc.Col([
-                    dbc.Card([dbc.CardBody([
-                        html.Div([
-                            html.Div([
-                                html.Span("🌋 Volcano Plot",
-                                          style={'fontWeight': '600', 'fontSize': '14px',
-                                                 'color': '#1a237e', 'marginBottom': '4px',
-                                                 'display': 'block'}),
-                                html.Small("Interactive differential expression • Lasso select genes",
-                                           style={'color': '#666', 'fontSize': '11px'}),
-                                html.Div(id='volcano-stats', style={'marginTop': '4px'})
-                            ], style={'marginBottom': '8px'}),
-
-                            dcc.Graph(
-                                id='volcano-graph-obj',
-                                config={
-                                    'displayModeBar': True,
-                                    'scrollZoom': True,
-                                    'responsive': True,
-                                    'modeBarButtonsToAdd': ['lasso2d', 'select2d', 'pan2d',
-                                                            'zoom2d', 'resetScale2d'],
-                                    'toImageButtonOptions': {
-                                        'format': 'png',
-                                        'filename': f'volcano_plot_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
-                                        'height': 800, 'width': 1200, 'scale': 2
-                                    }
-                                },
-                                style={'height': '450px', 'width': '100%'}
-                            ),
-
-                            html.Hr(style={'margin': '12px 0', 'borderColor': '#e9ecef'}),
-
-                            # ── TOP HITS QUICK-VIEW (NEW FEATURE) ──────────
-                            html.Div([
-                                html.Div([
-                                    html.Span("📋 Top Hits",
-                                              style={'fontWeight': '600', 'fontSize': '13px',
-                                                     'color': '#1a237e'}),
-                                    html.Small(" • Genes at current thresholds",
-                                               style={'color': '#666', 'fontSize': '11px',
-                                                      'marginLeft': '6px'}),
-                                    dbc.Button([
-                                        html.I(className="fas fa-download",
-                                               style={'marginRight': '4px'}),
-                                        "CSV"
-                                    ], id='download-tophits-btn',
-                                       color="outline-success", size="sm",
-                                       style={'float': 'right', 'fontSize': '10px',
-                                              'height': '24px', 'padding': '2px 8px'})
-                                ], style={'marginBottom': '6px', 'overflow': 'hidden'}),
-                                dcc.Loading(type='default', color='#1565c0', children=[
-                                    dash_table.DataTable(
-                                        id='top-hits-table',
-                                        columns=[
-                                            {'name': 'Gene',   'id': 'symbol'},
-                                            {'name': 'Log2FC', 'id': 'log2FC',
-                                             'type': 'numeric',
-                                             'format': {'specifier': '.3f'}},
-                                            {'name': 'Adj.P',  'id': 'padj',
-                                             'type': 'numeric',
-                                             'format': {'specifier': '.2e'}},
-                                            {'name': 'Status', 'id': 'status'},
-                                        ],
-                                        data=[],
-                                        filter_action='native',
-                                        sort_action='native',
-                                        sort_mode='single',
-                                        page_size=8,
-                                        style_table={'overflowX': 'auto',
-                                                     'maxHeight': '240px',
-                                                     'overflowY': 'auto'},
-                                        style_cell={'textAlign': 'left',
-                                                    'padding': '4px 8px',
-                                                    'fontSize': '11px',
-                                                    'fontFamily': 'inherit'},
-                                        style_header={'backgroundColor': '#f0f4f8',
-                                                      'fontWeight': 'bold',
-                                                      'fontSize': '11px'},
-                                        style_data_conditional=[
-                                            {'if': {'filter_query': '{status} = "Up"'},
-                                             'color': '#c62828', 'fontWeight': '600'},
-                                            {'if': {'filter_query': '{status} = "Down"'},
-                                             'color': '#1565c0', 'fontWeight': '600'},
-                                            {'if': {'row_index': 'odd'},
-                                             'backgroundColor': '#fafafa'},
-                                        ],
-                                        export_format='csv',
-                                    )
-                                ])
-                            ], style={'marginBottom': '12px'}),
-
-                            html.Hr(style={'margin': '8px 0', 'borderColor': '#e9ecef'}),
-
-                            html.Div([
-                                html.Span("🟥 Expression Heatmap",
-                                          style={'fontWeight': '600', 'fontSize': '14px',
-                                                 'color': '#1a237e', 'marginBottom': '4px',
-                                                 'display': 'block'}),
-                                html.Small("Fold-change profile of selected genes",
-                                           style={'color': '#666', 'fontSize': '11px'}),
-                                html.Div(id='heatmap-stats', style={'marginTop': '4px'})
-                            ], style={'marginBottom': '8px'}),
-
-                            dcc.Graph(
-                                id='gene-heatmap-obj',
-                                config={
-                                    'displayModeBar': True,
-                                    'responsive': True,
-                                    'toImageButtonOptions': {
-                                        'format': 'png',
-                                        'filename': f'expression_heatmap_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
-                                        'height': 600, 'width': 800, 'scale': 2
-                                    }
-                                },
-                                style={'height': '360px', 'width': '100%'}
-                            ),
-                        ])
-                    ])], className="shadow-sm")
-                ], xs=12, lg=7),
-
-                # Pathway enrichment + GSEA Curve
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader(html.Div([
-                            html.Span("🧪 Pathway Enrichment",
-                                      style={'fontWeight': '700', 'fontSize': '15px'}),
-                            html.Small(" • Fisher exact + BH correction",
-                                       style={'color': '#6c757d', 'fontSize': '11px'})
-                        ])),
-                        dbc.CardBody([
-                            # FEATURE-B — gene set database selector
-                            dcc.Dropdown(id='geneset-dropdown', className="mb-3",
-                                options=[
-                                    {'label': 'KEGG 2021 Human',
-                                     'value': 'KEGG_2021_Human'},
-                                    {'label': 'GO Biological Process',
-                                     'value': 'GO_Biological_Process_2023'},
-                                    {'label': 'Reactome 2022',
-                                     'value': 'Reactome_2022'},
-                                    {'label': 'MSigDB Hallmarks',
-                                     'value': 'MSigDB_Hallmark_2020'},
-                                    {'label': 'WikiPathways 2023',
-                                     'value': 'WikiPathways_2023_Human'},
-                                ],
-                                value='KEGG_2021_Human', clearable=False
-                            ),
-                            dcc.Loading(
-                                type='circle', color='#1565c0',
-                                children=[
-                                    dcc.Graph(
-                                        id='pathway-bubble-obj',
-                                        config={
-                                            "displayModeBar": True,
-                                            "responsive": True,
-                                            "toImageButtonOptions": {
-                                                'format': 'png',
-                                                'filename': f'pathway_enrichment_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
-                                                'height': 700, 'width': 900, 'scale': 2
-                                            }
-                                        },
-                                        style={'height': '450px', 'width': '100%'}
-                                    ),
-                                    html.Div(id='enrichment-table-container',
-                                             className="mt-3")
-                                ]
-                            ),
-
-                            # ── GSEA ENRICHMENT CURVE (NEW FEATURE) ────────
-                            html.Hr(style={'margin': '12px 0', 'borderColor': '#e9ecef'}),
-                            html.Div([
-                                html.Span("📈 GSEA Enrichment Curve",
-                                          style={'fontWeight': '600', 'fontSize': '13px',
-                                                 'color': '#1a237e'}),
-                                html.Small(" • Click a pathway bubble to render",
-                                           style={'color': '#888', 'fontSize': '11px',
-                                                  'marginLeft': '6px'})
-                            ], style={'marginBottom': '6px'}),
-                            dcc.Loading(type='default', color='#1565c0',
-                                children=dcc.Graph(
-                                    id='gsea-curve-graph',
-                                    config={'displayModeBar': True, 'responsive': True},
-                                    style={'height': '280px', 'width': '100%'}
-                                )
-                            )
-                        ])
-                    ], className="shadow-sm")
-                ], xs=12, lg=5)
-
-            ], className="g-3")
-        ], xs=12, md=9)
-
-    ], className="mb-3"),
-
-    # ── ADVANCED ANALYSIS SUMMARY ───────────────────────
-    dbc.Row([dbc.Col([
-        dbc.Card([dbc.CardBody([
-            html.Div(id='summary-panel',
-                     children=html.P("Load data to see comprehensive analysis summary.",
-                                     style={'color': '#aaa', 'fontStyle': 'italic', 'margin': 0}))
-        ])], className="shadow-sm")
-    ], width=12)], className="mb-4"),
-
-    # ── ADVANCED MULTI-OMICS ANALYTICS ─────────────────
-    dbc.Row([dbc.Col([
-        dbc.Card([
-            dbc.CardHeader(html.Div([
-                html.Span("🧬 Advanced Multi-Omics Analytics", style={'fontWeight': '700', 'fontSize': '15px'}),
-                html.Small(" • 3D PCA • WGCNA-lite • Preranked GSEA • Gene metadata • Reporting",
-                           style={'color': '#6c757d', 'fontSize': '11px'})
-            ])),
-            dbc.CardBody([
-                dbc.Row([
-                    dbc.Col([
-                        html.Div([
-                            html.Span("3D PCA Projection", style={'fontWeight': '600', 'fontSize': '13px'}),
-                            html.Small("Clusters inferred from expression signature similarity.",
-                                       style={'color': '#666', 'fontSize': '11px'})
-                        ], style={'marginBottom':'6px'}),
-                        dcc.Loading(
-                            type='circle',
-                            color='#1565c0',
-                            children=dcc.Graph(
-                                id='pca-3d-graph',
-                                config={'displayModeBar': True, 'responsive': True},
-                                style={'height': '360px', 'width': '100%'}
-                            )
-                        )
-                    ], xs=12, sm=12, md=12, lg=4, xl=4),
-                    dbc.Col([
-                        html.Div([
-                            html.Span("Preranked GSEA", style={'fontWeight': '600', 'fontSize': '13px'}),
-                            html.Small("Rank genes by effect size and p-value for pathway discovery.",
-                                       style={'color': '#666', 'fontSize': '11px'})
-                        ], style={'marginBottom':'6px'}),
-                        dcc.Loading(
-                            type='circle',
-                            color='#1565c0',
-                            children=[
-                                dcc.Graph(
-                                    id='gsea-bar-graph',
-                                    config={'displayModeBar': True, 'responsive': True},
-                                    style={'height': '360px', 'width': '100%'}
-                                ),
-                                html.Div(id='gsea-summary', style={'marginTop': '8px', 'fontSize': '12px', 'color': '#444'})
-                            ]
-                        )
-                    ], xs=12, sm=12, md=12, lg=4, xl=4),
-                    dbc.Col([
-                        html.Div([
-                            html.Span("Co-expression Network", style={'fontWeight': '600', 'fontSize': '13px'}),
-                            html.Small("WGCNA-lite module detection from differential expression signal.",
-                                       style={'color': '#666', 'fontSize': '11px'})
-                        ], style={'marginBottom':'6px'}),
-                        dcc.Loading(
-                            type='circle',
-                            color='#1565c0',
-                            children=dcc.Graph(
-                                id='network-graph',
-                                config={'displayModeBar': True, 'responsive': True},
-                                style={'height': '360px', 'width': '100%'}
-                            )
-                        )
-                    ], xs=12, sm=12, md=12, lg=4, xl=4)
-                ]),
-                html.Hr(style={'margin':'16px 0','borderColor':'#e9ecef'}),
-                dbc.Row([
-                    dbc.Col([
-                        html.Div([
-                            html.Span("Meta-Score Prioritisation", style={'fontWeight': '600', 'fontSize': '13px'}),
-                            html.Small("Composite gene ranking combining effect size and significance.",
-                                       style={'color': '#666', 'fontSize': '11px'})
-                        ], style={'marginBottom':'6px'}),
-                        dcc.Graph(
-                            id='meta-score-bar',
-                            config={'displayModeBar': True, 'responsive': True},
-                            style={'height': '320px', 'width': '100%'}
-                        )
-                    ], xs=12, sm=12, md=12, lg=8, xl=8),
-                    dbc.Col([
-                        html.Div([
-                            html.Label("Gene Bio-Context Lookup", htmlFor='gene-search-input', style={'fontWeight': '600', 'fontSize': '13px'}),
-                            html.Small("Fetch NCBI/UniProt metadata for selected gene symbols.",
-                                       style={'color': '#666', 'fontSize': '11px'})
-                        ], style={'marginBottom':'6px'}),
-                        dcc.Input(id='gene-search-input', type='text', placeholder='Enter gene symbol', name='gene-search', style={'width': '100%', 'marginBottom': '6px'}),
-                        dbc.Button('Lookup Gene Info', id='lookup-gene-btn', color='primary', size='sm', className='mb-2'),
-                        html.Div(id='gene-info-panel', style={'fontSize': '12px', 'color': '#333', 'lineHeight': '1.5'})
-                    ], xs=12, sm=12, md=12, lg=4, xl=4)
-                ]),
-                html.Div([
-                    dbc.Button('Download Analysis Report', id='download-pdf-btn', color='secondary', className='export-btn', n_clicks=0),
-                    html.Span(id='integrity-display', style={'marginLeft': '12px', 'fontSize': '12px', 'color': '#444'})
-                ], style={'marginTop': '12px'})
-            ])
-        ], className='shadow-sm')
-    ], width=12)
-], className='mb-4'),
-
-    # ── SESSION INFO & EXPORT ───────────────────────────
-    dbc.Row([dbc.Col([
-        html.Div(id='session-info', style={'fontSize':'11px','color':'#666','textAlign':'center','marginBottom':'8px'})
-    ], width=12)]),
-
-    # ── HIDDEN COMPAT COMPONENTS (preserve callback wiring) ────────────────────
-    # demo-btn, lfc-slider, pval-slider were sidebar-only controls now replaced
-    # by load-demo-btn, lfc-thresh-slider, padj-thresh-dd — kept hidden so
-    # any callback that still reads them doesn't raise a missing-component error.
+SIDEBAR = dbc.Col([
     html.Div([
-        dbc.Button(id='demo-btn'),
-        html.Div(dcc.Slider(id='lfc-slider', min=0.5, max=3.0, step=0.5, value=1.0)),
-        html.Div(dcc.Slider(id='pval-slider', min=1, max=5, step=1, value=2)),
-    ], style={'display': 'none'}),
+        html.Div("🧬", style={"fontSize": 36}),
+        html.H5("Apex Bioinformatics", className="mb-0 text-white fw-bold"),
+        html.Small("Full-Scale Engine v3.1", className="text-white-50"),
+    ], className="p-3 text-center",
+       style={"background": "linear-gradient(135deg,#1a5276,#117a65)"}),
 
-    # ── ENHANCED STORES ────────────────────────────────
-    dcc.Store(id='dge-data-store'),
-    dcc.Store(id='gsea-results-store', data={}),
-    dcc.Store(id='volcano-filter-genes', data=[]),
-    dcc.Store(id='enrichment-results-store'),  # FIXED: BUG-1
-    dcc.Download(id='download-tophits'),       # ADDED: export top hits
-    dcc.Store(id='session-store', data={'session_id': create_session_id(), 'start_time': datetime.now().isoformat()}),
-    dcc.Store(id='analysis-metadata', data={}),
-    dcc.Store(id='gsea-store', data={}),
-    dcc.Store(id='pca-store', data={}),
-    dcc.Store(id='network-store', data={}),
-    dcc.Store(id='integrity-store', data={}),
-    dcc.Store(id='ora-params-store', data={}),
-    dcc.Download(id='download-results'),
-    
-    # ── SESSION MANAGEMENT COMPONENTS ────────────────────
-    dcc.Store(id='persistent-session-store', storage_type='local'),
-    dcc.Download(id='download-session'),
-    html.Div(id='session-modal-container'),
-    
-    # Save Session Modal
-    dbc.Modal([
-        dbc.ModalHeader("Save Analysis Session"),
-        dbc.ModalBody([
-            dbc.Form([
-                html.Div([
-                    dbc.Label("Session Name", html_for="session-name-input"),
-                    dbc.Input(id='session-name-input', type='text', placeholder='e.g., PBMC_LPS_Analysis_v1', name='session-name')
-                ], className='mb-3'),
-                html.Div([
-                    dbc.Label("Description (optional)", html_for="session-desc-input"),
-                    dbc.Textarea(id='session-desc-input', placeholder='Add notes about this analysis...', rows=3, name='session-description')
-                ], className='mb-3')
-            ])
-        ]),
-        dbc.ModalFooter([
-            dbc.Button("Cancel", id="save-session-cancel", className="me-2"),
-            dbc.Button("Save Session", id="save-session-confirm", color="primary")
-        ])
-    ], id="save-session-modal", is_open=False),
-    
-    # Load Session Modal
-    dbc.Modal([
-        dbc.ModalHeader("Load Analysis Session"),
-        dbc.ModalBody([
-            html.Div(id='sessions-list-container')
-        ]),
-        dbc.ModalFooter([
-            dbc.Button("Close", id="load-session-cancel", className="me-2")
-        ])
-    ], id="load-session-modal", is_open=False, size="lg"),
-    
-    # Export Options Modal
-    dbc.Modal([
-        dbc.ModalHeader("Export Analysis Results"),
-        dbc.ModalBody([
-            html.Div([
-                html.H6("Choose Export Format:", style={'marginBottom': '12px'}),
-                dbc.ButtonGroup([
-                    dbc.Button(
-                        [html.I(className="fas fa-file-excel", style={'marginRight':'6px'}), "Excel"],
-                        id='export-excel-btn', color='info', outline=True
-                    ),
-                    dbc.Button(
-                        [html.I(className="fas fa-code", style={'marginRight':'6px'}), "JSON"],
-                        id='export-json-btn', color='info', outline=True
-                    ),
-                    dbc.Button(
-                        [html.I(className="fas fa-file-csv", style={'marginRight':'6px'}), "CSV"],
-                        id='export-csv-btn', color='info', outline=True
-                    ),
-                ], style={'width': '100%', 'marginBottom': '12px'}, vertical=False),
-                html.Hr(),
-                html.P("Excel: Multi-sheet workbook with data, enrichment, summary, parameters", 
-                       style={'fontSize': '11px', 'color': '#666', 'marginBottom': '4px'}),
-                html.P("JSON: Complete analysis export with metadata for programmatic access", 
-                       style={'fontSize': '11px', 'color': '#666', 'marginBottom': '4px'}),
-                html.P("CSV: Separate files for gene data and enrichment results", 
-                       style={'fontSize': '11px', 'color': '#666', 'marginBottom': '12px'}),
-                html.Div(id='export-status-message', style={'fontSize': '11px', 'marginTop': '12px'})
-            ])
-        ]),
-        dbc.ModalFooter([
-            dbc.Button("Close", id="export-modal-close", className="me-2"),
-        ], style={'justifyContent': 'flex-start'})
-    ], id="export-options-modal", is_open=False),
-    
-    # Batch Comparison Results Modal
-    dbc.Modal([
-        dbc.ModalHeader("Batch Analysis Results"),
-        dbc.ModalBody([
-            dbc.Tabs([
-                dbc.Tab([
-                    html.Div(id='batch-comparison-table', style={'marginTop': '12px'})
-                ], label="Comparison Summary"),
-                dbc.Tab([
-                    html.Div(id='batch-overlap-analysis', style={'marginTop': '12px'})
-                ], label="Gene Overlaps"),
-                dbc.Tab([
-                    html.Div(id='batch-errors-panel', style={'marginTop': '12px'})
-                ], label="Processing Status")
-            ])
-        ], style={'maxHeight': '70vh', 'overflowY': 'auto'}),
-        dbc.ModalFooter([
-            dbc.Button("Export Results", id="batch-export-btn", color="success", className="me-2"),
-            dbc.Button("Close", id="batch-results-close")
-        ])
-    ], id="batch-results-modal", is_open=False, size="xl"),
-    
-    # Download components
-    dcc.Download(id='download-excel'),
-    dcc.Download(id='download-json'),
-    dcc.Download(id='download-enrich-csv'),
-    
-    # Progress tracking
-    dcc.Interval(id='progress-update-interval', interval=1000, n_intervals=0, disabled=True),  # Disabled by default, update every second
-    dcc.Store(id='progress-active-store', data={}),
+    html.Div([
+        _section_head("⚡", "Data & Thresholds"),
 
-], fluid=True)
+        html.Label("📂 Data Source", className="fw-bold small text-muted mb-1"),
+        dcc.Upload(
+            id="upload-data",
+            children=dbc.Button("⬆ Upload DGE CSV", color="primary",
+                                outline=True, size="sm", className="w-100"),
+            accept=".csv",
+        ),
+        html.Div(id="upload-status",
+                 className="small text-muted mt-1 px-1",
+                 children="📊 Demo: 30-gene panel loaded"),
 
-# ── CALLBACK 1: Load data (upload OR demo button) ────────────────────────────
+        html.Hr(className="my-2"),
+        html.Label("⚙️ Analysis Thresholds", className="fw-bold small text-muted"),
+        html.Label("|Log2FC| cutoff", className="small"),
+        dcc.Slider(id="lfc-thresh", min=0.5, max=3.0, step=0.1, value=1.0,
+                   marks={0.5: "0.5", 1: "1", 2: "2", 3: "3"},
+                   tooltip={"placement": "bottom", "always_visible": False}),
+        html.Label("Adj. p-value cutoff", className="small"),
+        dcc.Slider(id="p-thresh", min=0.001, max=0.1, step=0.001, value=0.05,
+                   marks={0.01: "0.01", 0.05: "0.05", 0.1: "0.1"},
+                   tooltip={"placement": "bottom", "always_visible": False}),
 
-@app.callback(
-    Output('dge-data-store', 'data'),
-    Output('volcano-graph-obj', 'figure'),
-    Output('summary-panel', 'children'),
-    Output('main-alert', 'children'),
-    Output('main-alert', 'color'),
-    Output('main-alert', 'is_open'),
-    Output('help-panel', 'is_open'),
-    Output('upload-validation-alert', 'children'),
-    Output('upload-validation-alert', 'color'),
-    Output('upload-validation-alert', 'is_open'),
-    Output('upload-alert', 'children'),   # FIXED: BUG-4
-    Output('upload-alert', 'color'),      # FIXED: BUG-4
-    Output('upload-alert', 'is_open'),    # FIXED: BUG-4
-    Input('main-upload-comp', 'contents'),
-    Input('load-demo-btn', 'n_clicks'),
-    Input('lfc-thresh-slider', 'value'),
-    Input('padj-thresh-dd', 'value'),
-    Input('volcano-filter-genes', 'data'),
-    Input('lfc-slider', 'value'),         # ADDED: FEATURE-C
-    Input('pval-slider', 'value'),        # ADDED: FEATURE-C
-    State('main-upload-comp', 'filename'),
-    State('dge-data-store', 'data'),
-    prevent_initial_call=False
-)
-def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
-                             filtered_genes, lfc_slider_val, pval_slider_val,
-                             filename, existing_data):
+        html.Hr(className="my-2"),
+        _section_head("🗃️", "Pathway Database"),
+        dcc.RadioItems(
+            id="pathway-db",
+            options=DB_OPTIONS,
+            value="all",
+            labelStyle={"display": "block", "fontSize": 12, "marginBottom": 3},
+            inputStyle={"marginRight": 5},
+        ),
 
-    triggered = ctx.triggered_id
+        html.Hr(className="my-2"),
+        html.Label("🔍 Gene Bio-Context", className="fw-bold small text-muted"),
+        dbc.Input(id="gene-input", placeholder="e.g. TNF  IL6  TP53",
+                  type="text", size="sm", debounce=True, className="mb-1"),
+        dcc.Loading(
+            html.Div(id="gene-panel",
+                     style={"fontSize": 11, "maxHeight": 220, "overflowY": "auto"}),
+            type="dot",
+        ),
 
-    # ADDED: FEATURE-C — compact slider overrides when triggered
-    if triggered == 'lfc-slider' and lfc_slider_val is not None:
-        lfc_thresh = lfc_slider_val
-    if triggered == 'pval-slider' and pval_slider_val is not None:
-        p_thresh = 10 ** (-pval_slider_val)
+        html.Hr(className="my-2"),
+        dbc.Button("📥 Download PDF Report", id="btn-pdf",
+                   color="success", size="sm", className="w-100 mb-2"),
+        dcc.Download(id="dl-pdf"),
 
-    df = None
-    validation_msg = dash.no_update
-    validation_color = dash.no_update
-    validation_open = False
-
-    if triggered == 'load-demo-btn' and n_clicks:
-        df = DEMO_DF.copy()
-
-    elif triggered == 'main-upload-comp' and contents is not None:
-        try:
-            content_type, content_string = contents.split(',')
-            decoded = base64.b64decode(content_string)
-            temp_df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
-
-            # Use enhanced validation
-            df, errors, warnings, html_summary = validate_deg_data(temp_df)
-
-            if errors:
-                empty_fig = create_volcano_plot(pd.DataFrame(columns=['log2_fold_change', 'adjusted_p_value', 'gene_symbol']),
-                                                'log2_fold_change', 'adjusted_p_value', 'gene_symbol')
-                err_msg = " | ".join(errors)
-                return (None, empty_fig, dash.no_update,
-                        dash.no_update, dash.no_update, False, True,
-                        html_summary, 'danger', True,
-                        err_msg, 'danger', True)
-
-            if warnings or html_summary:
-                logger.warning(f"Data validation: {len(warnings)} warnings")
-                # Show validation details as warning alert, but continue loading data
-                validation_msg = html_summary
-                validation_color = 'warning'
-                validation_open = True
-            else:
-                validation_msg = dash.no_update
-                validation_color = dash.no_update
-                validation_open = False
-
-            # Rename columns to match expected format
-            df = df.rename(columns={
-                'gene_symbol': 'symbol',
-                'log2_fold_change': 'log2FC',
-                'adjusted_p_value': 'padj'
-            })
-
-        except Exception as e:
-            logger.error(f"Upload error: {e}")
-            msg = f"Could not parse file: {str(e)}. Ensure it is a comma-separated CSV with required columns."
-            return (None, dash.no_update, dash.no_update,
-                    msg, 'danger', True, True,
-                    dash.no_update, dash.no_update, False,
-                    f"Parse error: {str(e)}", 'danger', True)  # FIXED: BUG-4
-
-    elif existing_data and triggered in ('lfc-thresh-slider', 'padj-thresh-dd', 'volcano-filter-genes',
-                                          'lfc-slider', 'pval-slider'):  # ADDED: FEATURE-C
-        df = pd.DataFrame(existing_data)
-
-    else:
-        empty_fig = create_volcano_plot(pd.DataFrame(columns=['log2FC', 'padj', 'symbol']),
-                                        'log2FC', 'padj', 'symbol')
-        return (None, empty_fig, dash.no_update,
-                dash.no_update, dash.no_update, False, True,
-                dash.no_update, dash.no_update, False,
-                dash.no_update, dash.no_update, False)  # FIXED: BUG-4
-
-    fig = create_volcano_plot(df, 'log2FC', 'padj', 'symbol',
-                               lfc_thresh=lfc_thresh, p_thresh=p_thresh,
-                               filtered_genes=filtered_genes if filtered_genes else None)
-
-    n_total = len(df)
-    n_up   = int(((df['log2FC'] > lfc_thresh) & (df['padj'] < p_thresh)).sum())
-    n_down = int(((df['log2FC'] < -lfc_thresh) & (df['padj'] < p_thresh)).sum())
-    n_ns   = n_total - n_up - n_down
-
-    top_up   = df[df['log2FC'] > 0].nsmallest(1, 'padj')
-    top_down = df[df['log2FC'] < 0].nsmallest(1, 'padj')
-    up_str   = f"{top_up.iloc[0]['symbol']} (log2FC={top_up.iloc[0]['log2FC']:.2f})"     if len(top_up)   else "N/A"
-    down_str = f"{top_down.iloc[0]['symbol']} (log2FC={top_down.iloc[0]['log2FC']:.2f})" if len(top_down) else "N/A"
-
-    summary = html.Div([
-        html.H6("📊 Comprehensive Analysis Summary", style={'marginBottom': '12px', 'fontWeight': '700', 'color': '#1a237e'}),
         html.Div([
-            html.Div([
-                html.Strong("Dataset Overview", style={'fontSize': '13px', 'display': 'block', 'marginBottom': '6px'}),
-                html.P(f"Total genes analyzed: {n_total:,}", style={'margin': '2px 0', 'fontSize': '12px'}),
-                html.P(f"Significantly upregulated: {n_up:,} genes", style={'margin': '2px 0', 'fontSize': '12px', 'color': '#d32f2f'}),
-                html.P(f"Significantly downregulated: {n_down:,} genes", style={'margin': '2px 0', 'fontSize': '12px', 'color': '#1976d2'}),
-                html.P(f"Not significant: {n_ns:,} genes", style={'margin': '2px 0', 'fontSize': '12px', 'color': '#666'}),
-            ], style={'flex': '1', 'minWidth': '200px'}),
-            html.Div([
-                html.Strong("Top Genes", style={'fontSize': '13px', 'display': 'block', 'marginBottom': '6px'}),
-                html.P(f"Most upregulated: {up_str}", style={'margin': '2px 0', 'fontSize': '12px'}),
-                html.P(f"Most downregulated: {down_str}", style={'margin': '2px 0', 'fontSize': '12px'}),
-                html.P(f"Current thresholds: |log2FC| > {lfc_thresh}, p-adj < {p_thresh}",
-                       style={'margin': '2px 0', 'fontSize': '11px', 'color': '#666'}),
-            ], style={'flex': '1', 'minWidth': '200px'}),
-        ], style={'display': 'flex', 'gap': '20px', 'flexWrap': 'wrap', 'marginBottom': '12px'}),
-        html.Hr(style={'margin': '8px 0', 'borderColor': '#e9ecef'}),
-        html.Div([
-            html.Small("💡 Tip: Use lasso selection on the volcano plot to identify pathway-enriched gene sets",
-                       style={'color': '#666', 'fontSize': '11px'})
-        ])
-    ])
+            html.Small("🔒 Data stays in your browser session.",
+                       className="text-muted"),
+        ], className="px-1 pb-2"),
 
-    success_msg = (f"\u2713 Loaded {n_total} genes \u2014 {n_up} up, {n_down} down at "
-                   f"log2FC>{lfc_thresh}, padj<{p_thresh}. "
-                   f"Use lasso selection on the volcano plot to explore pathways.")
-
-    # FIXED: BUG-4 — upload-alert success message
-    upload_alert_content = (f"\u2713 Loaded {len(df)} genes from {filename}"
-                            if filename else f"\u2713 Loaded {len(df)} genes")
-    return (df.to_dict('records'), fig, summary,
-            success_msg, 'success', True, False,
-            validation_msg, validation_color, validation_open,
-            upload_alert_content, 'success', True)
+    ], className="p-2"),
+], width=3, className="bg-light border-end",
+   style={"minHeight": "100vh", "position": "sticky", "top": 0, "overflowY": "auto"})
 
 
-# ── CALLBACK 2: Lasso selection → pathway enrichment + heatmap ───────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Main panel
+# ─────────────────────────────────────────────────────────────────────────────
 
-@app.callback(
-    Output('pathway-bubble-obj', 'figure'),
-    Output('gene-heatmap-obj', 'figure'),
-    Output('enrichment-table-container', 'children'),
-    Output('gsea-results-store', 'data'),
-    Output('enrichment-results-store', 'data'),  # FIXED: BUG-1
-    Input('volcano-graph-obj', 'selectedData'),
-    Input('geneset-dropdown', 'value'),           # ADDED: FEATURE-B
-    State('dge-data-store', 'data'),
-    prevent_initial_call=True
+MAIN = dbc.Col([
+    dcc.Store(id="store"),       # per-session DEG data
+    dcc.Store(id="enr-store"),   # per-session enrichment results
+    dcc.Store(id="bm-store"),    # per-session biomarker scores
+
+    # Summary banner
+    html.Div(id="banner",
+             className="d-flex flex-wrap gap-2 p-2 border-bottom bg-white"),
+
+    dbc.Tabs([
+
+        # ── 1. Meta-Score ─────────────────────────────────────────────────
+        dbc.Tab(label="🏆 Meta-Score", tab_id="tab-meta", children=[
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="meta-bar", style={"height": 480}), type="circle",
+                ), width=5),
+                dbc.Col([
+                    html.H6("Meta-Score Prioritization",
+                            className="fw-bold mt-2 mb-0", style={"color": "#1a5276"}),
+                    html.Small("Combined significance × effect size. Green ≥ 70.",
+                               className="text-muted d-block mb-2"),
+                    dcc.Loading(html.Div(id="meta-table"), type="dot"),
+                    dbc.Button("⬇ Download CSV", id="btn-meta-csv", color="secondary",
+                               outline=True, size="sm", className="mt-2"),
+                    dcc.Download(id="dl-meta-csv"),
+                ], width=7),
+            ], className="mt-2 px-2"),
+        ]),
+
+        # ── 2. Volcano & Pathway ──────────────────────────────────────────
+        dbc.Tab(label="🌋 Volcano & Pathway", tab_id="tab-volcano", children=[
+            dbc.Row([
+                dbc.Col(
+                    dbc.Alert([
+                        "💡 Click ", html.Strong("Lasso"), " or ",
+                        html.Strong("Box Select"), " in the toolbar, "
+                        "draw a selection → pathway enrichment updates for that gene subset.",
+                    ], color="info", className="py-1 px-2 mb-1 small"),
+                    width=8,
+                ),
+                dbc.Col(
+                    html.Div(id="sel-counter",
+                             className="text-muted small text-end align-self-center"),
+                    width=4,
+                ),
+            ], className="px-2 pt-1"),
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="volcano", style={"height": 460},
+                              config={"modeBarButtonsToAdd": ["lasso2d", "select2d"]}),
+                    type="circle",
+                ), width=6),
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="bubble", style={"height": 430}), type="circle",
+                ), width=6),
+            ], className="mt-1 px-2"),
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="path-bar", style={"height": 400}), type="circle",
+                ), width=6),
+                dbc.Col([
+                    dcc.Loading(html.Div(id="path-table"), type="dot"),
+                    dbc.Button("⬇ Enrichment CSV", id="btn-enr-csv", color="secondary",
+                               outline=True, size="sm", className="mt-2"),
+                    dcc.Download(id="dl-enr-csv"),
+                ], width=6),
+            ], className="px-2 mt-1"),
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="crosstalk", style={"height": 440}), type="circle",
+                ), width=12),
+            ], className="px-2 mt-1"),
+        ]),
+
+        # ── 3. 3D PCA ─────────────────────────────────────────────────────
+        dbc.Tab(label="🔵 3D PCA", tab_id="tab-pca", children=[
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="pca", style={"height": 540}), type="circle",
+                ), width=12),
+            ], className="mt-2 px-2"),
+            html.Div(id="pca-info", className="small text-muted px-3 pb-2"),
+        ]),
+
+        # ── 4. Advanced Analytics ─────────────────────────────────────────
+        dbc.Tab(label="📊 Advanced Analytics", tab_id="tab-adv", children=[
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="ma-plot",  style={"height": 340}), type="circle",
+                ), width=6),
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="heatmap",  style={"height": 340}), type="circle",
+                ), width=6),
+            ], className="mt-2 px-2"),
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="pval-hist", style={"height": 300}), type="circle",
+                ), width=4),
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="lfc-dist",  style={"height": 300}), type="circle",
+                ), width=4),
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="rank-plot", style={"height": 300}), type="circle",
+                ), width=4),
+            ], className="px-2 mt-1"),
+        ]),
+
+        # ── 5. GSEA ───────────────────────────────────────────────────────
+        dbc.Tab(label="🧬 GSEA", tab_id="tab-gsea", children=[
+            dbc.Alert(
+                "GSEA pre-ranked (requires ≥ 15 genes + internet for gene sets). "
+                "Each user runs in an isolated temp directory.",
+                color="secondary", className="py-1 px-2 mb-1 small",
+            ),
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="gsea-bar", style={"height": 400}), type="circle",
+                ), width=7),
+                dbc.Col(dcc.Loading(html.Div(id="gsea-table"), type="dot"), width=5),
+            ], className="mt-2 px-2"),
+        ]),
+
+        # ── 6. Gene Network ───────────────────────────────────────────────
+        dbc.Tab(label="🔗 Gene Network", tab_id="tab-net", children=[
+            dbc.Row([
+                dbc.Col(dcc.Loading(
+                    dcc.Graph(id="network", style={"height": 520}), type="circle",
+                ), width=12),
+            ], className="mt-2 px-2"),
+            html.Div(id="net-info", className="small text-muted px-3 pb-2"),
+        ]),
+
+        # ── 7. Drug Targets  ★ UNIQUE ─────────────────────────────────────
+        dbc.Tab(label="💊 Drug Targets", tab_id="tab-drugs", children=[
+            dbc.Row([
+                dbc.Col([
+                    dbc.Alert([
+                        "🎯 Significant DE genes mapped to ",
+                        html.Strong("FDA-approved drugs"),
+                        ". Upregulated targets = potential inhibitor candidates; "
+                        "downregulated = potential activator candidates.",
+                    ], color="success", className="py-1 px-2 mb-2 small"),
+                    dcc.Loading(
+                        dcc.Graph(id="drug-scatter", style={"height": 440}), type="circle",
+                    ),
+                ], width=8),
+                dbc.Col([
+                    dcc.Loading(
+                        dcc.Graph(id="drug-donut", style={"height": 340}), type="circle",
+                    ),
+                    dcc.Loading(html.Div(id="drug-table"), type="dot"),
+                    dbc.Button("⬇ Drug Targets CSV", id="btn-drug-csv", color="secondary",
+                               outline=True, size="sm", className="mt-2"),
+                    dcc.Download(id="dl-drug-csv"),
+                ], width=4),
+            ], className="mt-2 px-2"),
+        ]),
+
+        # ── 8. Biomarker Score  ★ UNIQUE ─────────────────────────────────
+        dbc.Tab(label="🎯 Biomarker Score", tab_id="tab-bm", children=[
+            dbc.Row([
+                dbc.Col([
+                    dbc.Alert([
+                        html.Strong("Biomarker Priority Score"),
+                        " = Meta-Score + clinical bonus for FDA drug targets (+15), "
+                        "COSMIC Tier-1 cancer genes (+10), established biomarkers (+5).",
+                    ], color="warning", className="py-1 px-2 mb-2 small"),
+                    dcc.Loading(
+                        dcc.Graph(id="bm-chart", style={"height": 480}), type="circle",
+                    ),
+                    dbc.Button("⬇ Biomarker CSV", id="btn-bm-csv", color="secondary",
+                               outline=True, size="sm", className="mt-1"),
+                    dcc.Download(id="dl-bm-csv"),
+                ], width=7),
+                dbc.Col([
+                    html.H6("Cancer Gene Annotations",
+                            className="fw-bold mt-2 mb-1", style={"color": "#1a5276"}),
+                    dcc.Loading(html.Div(id="cancer-table"), type="dot"),
+                ], width=5),
+            ], className="mt-2 px-2"),
+        ]),
+
+        # ── 9. Auto-Insights  ★ UNIQUE ───────────────────────────────────
+        dbc.Tab(label="📋 Insights", tab_id="tab-insights", children=[
+            dbc.Row([
+                dbc.Col([
+                    html.H5("🔬 Auto-Generated Biological Insights",
+                            className="fw-bold mt-2 mb-1", style={"color": "#1a5276"}),
+                    html.Small(
+                        "Rule-based interpretation of your differential expression results. "
+                        "No AI — fully reproducible, offline.",
+                        className="text-muted d-block mb-3",
+                    ),
+                    dcc.Loading(html.Div(id="insights-panel"), type="circle"),
+                ], width=12),
+            ], className="px-3 mt-2"),
+        ]),
+
+    ], id="tabs", active_tab="tab-meta"),
+], width=9)
+
+
+app.layout = dbc.Container(
+    dbc.Row([SIDEBAR, MAIN], className="g-0"),
+    fluid=True,
 )
-def run_enrichment_on_selection(selectedData, gene_set, stored_data):
-    empty_pathway = go.Figure().update_layout(
-        title="\u2196 Use lasso selection on the volcano plot to run pathway enrichment",
-        template='simple_white'
-    )
-    empty_heatmap = create_heatmap(pd.DataFrame(), [])
-    empty_msg = html.P("Select genes to see enrichment results.",
-                       style={'color': '#888', 'fontStyle': 'italic', 'padding': '8px'})
-
-    if not selectedData or not selectedData.get('points') or not stored_data:
-        return empty_pathway, empty_heatmap, empty_msg, {}, None  # FIXED: BUG-1
-
-    selected_genes = list(dict.fromkeys(
-        [p['customdata'] for p in selectedData['points'] if 'customdata' in p]
-    ))
-
-    # FIXED: BUG-1, ADDED: FEATURE-B — unpack 4 values, pass gene_set
-    pathway_fig, table, gene_index_dict, enrichment_json = create_pathway_enrichment(
-        selected_genes, gene_sets=gene_set
-    )
-    heatmap_fig = create_heatmap(pd.DataFrame(stored_data), selected_genes)
-
-    return pathway_fig, heatmap_fig, table, gene_index_dict, enrichment_json  # FIXED: BUG-1
 
 
-# ── CALLBACK 3: Pathway bubble click → highlight genes on volcano ─────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Callbacks
+# ─────────────────────────────────────────────────────────────────────────────
 
-# FIXED: BUG-1 — use enrichment-results-store (DataFrame JSON) for reliable gene lookup
+# ── Data ingest ───────────────────────────────────────────────────────────────
 @app.callback(
-    Output('volcano-filter-genes', 'data'),
-    Input('pathway-bubble-obj', 'clickData'),
-    State('enrichment-results-store', 'data'),  # FIXED: BUG-1
-    prevent_initial_call=True
+    Output("store", "data"),
+    Output("upload-status", "children"),
+    Input("upload-data", "contents"),
+    State("upload-data", "filename"),
 )
-def filter_volcano_by_pathway(clickData, enrichment_json):
-    if not clickData or not enrichment_json:
-        return []
+def cb_ingest(contents, fname):
+    if contents is None:
+        df = _load_demo()
+        return df.to_dict("records"), f"📊 Demo dataset — {len(df)} genes loaded"
     try:
-        term = clickData['points'][0]['y']
-        enr_df = pd.read_json(io.StringIO(enrichment_json), orient='records')
-        row = enr_df[enr_df['Term'] == term]
-        if row.empty:
-            return []
-        genes_str = row.iloc[0]['Genes']
-        return [g.strip() for g in str(genes_str).split(';') if g.strip()]
-    except Exception:
-        return []
-
-
-# ── CALLBACK 4: Reset button clears pathway filter ───────────────────────────
-
-@app.callback(
-    Output('volcano-filter-genes', 'data', allow_duplicate=True),
-    Input('reset-btn', 'n_clicks'),
-    prevent_initial_call=True
-)
-def reset_selection(n_clicks):
-    return []
-
-
-# ADDED: FEATURE-A — demo CSV loader sets upload component contents
-@app.callback(
-    Output('main-upload-comp', 'contents'),
-    Output('main-upload-comp', 'filename'),
-    Input('demo-btn', 'n_clicks'),
-    prevent_initial_call=True
-)
-def load_demo(n):
-    with open('data/demo_dge.csv', 'r') as f:
-        csv_str = f.read()
-    encoded = base64.b64encode(csv_str.encode()).decode()
-    return f"data:text/csv;base64,{encoded}", "demo_dge.csv"
-
-
-# ── CALLBACK: Top Hits Quick-View table ──────────────────────────────────────
-
-@app.callback(
-    Output('top-hits-table', 'data'),
-    Input('dge-data-store', 'data'),
-    Input('lfc-thresh-slider', 'value'),
-    Input('padj-thresh-dd', 'value'),
-    Input('lfc-slider', 'value'),
-    Input('pval-slider', 'value'),
-    prevent_initial_call=True
-)
-def update_top_hits(stored_data, lfc_thresh, p_thresh, lfc_slider_val, pval_slider_val):
-    if not stored_data:
-        return []
-    # Use compact sliders when they triggered
-    tid = ctx.triggered_id
-    if tid == 'lfc-slider' and lfc_slider_val is not None:
-        lfc_thresh = lfc_slider_val
-    if tid == 'pval-slider' and pval_slider_val is not None:
-        p_thresh = 10 ** (-pval_slider_val)
-
-    df = pd.DataFrame(stored_data)
-    sig = df[(df['log2FC'].abs() > lfc_thresh) & (df['padj'] < p_thresh)].copy()
-    sig['status'] = sig['log2FC'].apply(lambda v: 'Up' if v > 0 else 'Down')
-    sig = sig.sort_values('padj').head(200)
-    return sig[['symbol', 'log2FC', 'padj', 'status']].to_dict('records')
-
-
-# ── CALLBACK: Download Top Hits as CSV ───────────────────────────────────────
-
-@app.callback(
-    Output('download-tophits', 'data'),
-    Input('download-tophits-btn', 'n_clicks'),
-    State('dge-data-store', 'data'),
-    State('lfc-thresh-slider', 'value'),
-    State('padj-thresh-dd', 'value'),
-    State('lfc-slider', 'value'),
-    State('pval-slider', 'value'),
-    prevent_initial_call=True
-)
-def download_top_hits(n, stored_data, lfc_thresh, p_thresh,
-                      lfc_slider_val, pval_slider_val):
-    if not n or not stored_data:
-        return dash.no_update
-    # Resolve active thresholds
-    if lfc_slider_val is not None:
-        lfc_thresh = lfc_slider_val
-    if pval_slider_val is not None:
-        p_thresh = 10 ** (-pval_slider_val)
-
-    df = pd.DataFrame(stored_data)
-    sig = df[(df['log2FC'].abs() > lfc_thresh) & (df['padj'] < p_thresh)].copy()
-    sig['status'] = sig['log2FC'].apply(lambda v: 'Up' if v > 0 else 'Down')
-    sig = sig.sort_values('padj')
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    return dcc.send_data_frame(sig.to_csv, f'top_hits_{ts}.csv', index=False)
-
-
-# ── CALLBACK: GSEA Enrichment Curve ──────────────────────────────────────────
-
-@app.callback(
-    Output('gsea-curve-graph', 'figure'),
-    Input('pathway-bubble-obj', 'clickData'),
-    State('enrichment-results-store', 'data'),
-    State('dge-data-store', 'data'),
-    prevent_initial_call=True
-)
-def render_gsea_curve(clickData, enrichment_json, stored_data):
-    empty = create_gsea_plot('', [], None)
-    if not clickData or not enrichment_json or not stored_data:
-        return empty
-    try:
-        term = clickData['points'][0]['y']
-        enr_df = pd.read_json(io.StringIO(enrichment_json), orient='records')
-        row = enr_df[enr_df['Term'] == term]
-        if row.empty:
-            return empty
-        genes = [g.strip() for g in str(row.iloc[0]['Genes']).split(';') if g.strip()]
-        ranked_df = pd.DataFrame(stored_data)
-        return create_gsea_plot(term, genes, ranked_df)
-    except Exception:
-        return empty
-
-
-# ── CALLBACK 5: Data Quality Indicators ──────────────────────────────────────
-
-@app.callback(
-    Output('data-quality-panel', 'children'),
-    Output('volcano-stats', 'children'),
-    Output('heatmap-stats', 'children'),
-    Input('dge-data-store', 'data'),
-    Input('lfc-thresh-slider', 'value'),
-    Input('padj-thresh-dd', 'value'),
-    Input('analysis-options', 'value'),
-    prevent_initial_call=True
-)
-def update_data_quality_indicators(stored_data, lfc_thresh, p_thresh, analysis_options):
-    if not stored_data:
-        return dash.no_update, dash.no_update, dash.no_update
-
-    df = pd.DataFrame(stored_data)
-
-    # Data quality checks
-    quality_indicators = []
-
-    # Statistical validation
-    if 'stat_validation' in analysis_options:
-        n_sig = ((df['log2FC'].abs() > lfc_thresh) & (df['padj'] < p_thresh)).sum()
-        n_total = len(df)
-        sig_ratio = n_sig / n_total
-
-        if sig_ratio < 0.01:
-            quality_indicators.append(
-                html.Span("⚠️ Low significance rate", className="quality-indicator quality-warning")
-            )
-        elif sig_ratio > 0.3:
-            quality_indicators.append(
-                html.Span("⚠️ High significance rate", className="quality-indicator quality-warning")
-            )
-        else:
-            quality_indicators.append(
-                html.Span("✓ Statistical validation passed", className="quality-indicator quality-good")
-            )
-
-    # Data range validation
-    lfc_range = df['log2FC'].max() - df['log2FC'].min()
-    if lfc_range > 10:
-        quality_indicators.append(
-            html.Span("⚠️ Wide fold-change range", className="quality-indicator quality-warning")
-        )
-
-    # Volcano plot stats
-    n_up = ((df['log2FC'] > lfc_thresh) & (df['padj'] < p_thresh)).sum()
-    n_down = ((df['log2FC'] < -lfc_thresh) & (df['padj'] < p_thresh)).sum()
-    volcano_stats = html.Div([
-        html.Small(f"Up: {n_up} • Down: {n_down} • Total: {len(df)} genes",
-                   style={'color': '#666', 'fontSize': '10px'})
-    ])
-
-    # Heatmap stats (when genes are selected)
-    heatmap_stats = html.Div([
-        html.Small("Select genes on volcano plot to see heatmap",
-                   style={'color': '#999', 'fontSize': '10px'})
-    ])
-
-    quality_panel = html.Div(quality_indicators, style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap'})
-
-    return quality_panel, volcano_stats, heatmap_stats
-
-
-# ── CALLBACK 6: Advanced Analytics Computation ───────────────────────────
-
-@app.callback(
-    Output('pca-3d-graph', 'figure'),
-    Output('gsea-bar-graph', 'figure'),
-    Output('network-graph', 'figure'),
-    Output('meta-score-bar', 'figure'),
-    Output('gsea-summary', 'children'),
-    Output('gsea-store', 'data'),
-    Output('pca-store', 'data'),
-    Output('network-store', 'data'),
-    Output('integrity-store', 'data'),
-    Input('dge-data-store', 'data'),
-    Input('lfc-thresh-slider', 'value'),
-    Input('padj-thresh-dd', 'value'),
-    prevent_initial_call=True
-)
-def compute_advanced_analytics(stored_data, lfc_thresh, p_thresh):
-    default_fig = go.Figure().update_layout(template='simple_white')
-    if not stored_data:
-        return default_fig, default_fig, default_fig, default_fig, '', {}, {}, {}, {}
-
-    try:
-        df = pd.DataFrame(stored_data)
+        _, b64 = contents.split(",", 1)
+        raw = base64.b64decode(b64).decode("utf-8", errors="replace")
+        df  = _normalise(pd.read_csv(io.StringIO(raw)))
         if df.empty:
-            return default_fig, default_fig, default_fig, default_fig, 'No data available for advanced analytics.', {}, {}, {}, {}
-
-        meta_df = compute_meta_score(df.copy())
-        pca_result = run_pca_3d(df)
-        gsea_result = run_gsea_preranked(df)
-        network_result = run_wgcna_lite(df)
-        integrity_score = compute_data_integrity_score(df)
-
-        pca_fig = create_3d_pca(pca_result)
-        gsea_fig = create_gsea_bar(gsea_result)
-        network_fig = create_network_graph(network_result)
-        meta_fig = create_meta_score_bar(meta_df)
-
-        if gsea_result.get('error'):
-            gsea_summary_text = html.P(
-                f"Preranked GSEA unavailable: {gsea_result['error']}",
-                style={'color': '#c0392b', 'fontSize': '12px'}
+            return dash.no_update, dbc.Alert(
+                f"⚠️ {fname} parsed but 0 genes remained after normalisation. "
+                "Check that your file has symbol / log2FC / padj columns.",
+                color="warning", dismissable=True,
             )
-        else:
-            pathway_count = len(gsea_result.get('results', pd.DataFrame()))
-            gsea_summary_text = html.P(
-                f"Preranked GSEA computed {pathway_count} significant pathways.",
-                style={'color': '#444', 'fontSize': '12px'}
-            )
-
-        gsea_store_payload = gsea_result.copy()
-        if isinstance(gsea_store_payload.get('results'), pd.DataFrame):
-            gsea_store_payload['results'] = gsea_store_payload['results'].to_dict('records')
-
-        network_store_payload = {k: v for k, v in network_result.items() if k != 'graph'}
-
-        return (
-            pca_fig,
-            gsea_fig,
-            network_fig,
-            meta_fig,
-            gsea_summary_text,
-            gsea_store_payload,
-            pca_result,
-            network_store_payload,
-            integrity_score
+        log.info(f"Uploaded {fname}: {len(df)} genes, cols={df.columns.tolist()}")
+        return df.to_dict("records"), dbc.Alert(
+            f"✅ {fname} — {len(df):,} genes loaded", color="success", dismissable=True,
         )
     except Exception as e:
-        logger.error(f"Advanced analytics error: {e}", exc_info=True)
-        err_msg = html.P(f"Analytics error: {str(e)[:200]}",
-                         style={'color': '#c0392b', 'fontSize': '12px'})
-        return default_fig, default_fig, default_fig, default_fig, err_msg, {}, {}, {}, {}
-
-
-# ── CALLBACK 7: Session Info Display ─────────────────────────────────────────
-
-@app.callback(
-    Output('session-info', 'children'),
-    Input('session-store', 'data'),
-    Input('dge-data-store', 'data'),
-    prevent_initial_call=True
-)
-def update_session_info(session_data, data_store):
-    if not session_data:
-        return ""
-
-    session_id = session_data.get('session_id', 'Unknown')[:8]
-    start_time = session_data.get('start_time', '')
-    if start_time:
-        try:
-            start_dt = datetime.fromisoformat(start_time)
-            duration = datetime.now() - start_dt
-            duration_str = f"{duration.seconds // 3600}h {(duration.seconds % 3600) // 60}m"
-        except:
-            duration_str = "Unknown"
-    else:
-        duration_str = "Unknown"
-
-    data_status = "No data loaded" if not data_store else f"{len(data_store)} genes loaded"
-
-    return html.Small(f"Session {session_id} • {duration_str} • {data_status}",
-                      style={'color': '#888', 'fontSize': '10px'})
-
-
-# ── CALLBACK 7: Export Functionality ────────────────────────────────────────
-
-@app.callback(
-    Output('download-results', 'data'),
-    Input('export-btn', 'n_clicks'),
-    State('dge-data-store', 'data'),
-    State('gsea-results-store', 'data'),
-    State('volcano-filter-genes', 'data'),
-    State('session-store', 'data'),
-    prevent_initial_call=True
-)
-def export_analysis_results(n_clicks, data_store, gsea_results, selected_genes, session_data):
-    if not n_clicks or not data_store:
-        return dash.no_update
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # Create comprehensive export data
-    export_data = {
-        'session_info': session_data,
-        'dataset_summary': {
-            'total_genes': len(data_store),
-            'selected_genes': len(selected_genes) if selected_genes else 0,
-            'export_timestamp': timestamp
-        },
-        'differential_expression': data_store,
-        'pathway_enrichment': gsea_results if gsea_results else {},
-        'selected_gene_list': selected_genes if selected_genes else []
-    }
-
-    # Convert to JSON string
-    json_str = json.dumps(export_data, indent=2, default=str)
-
-    return dict(
-        content=json_str,
-        filename=f'rna_seq_analysis_{timestamp}.json',
-        type='application/json'
-    )
-
-
-# ── CALLBACK 8: Enhanced Upload Validation ──────────────────────────────────
-
-@app.callback(
-    Output('main-upload-comp', 'style'),
-    Input('main-upload-comp', 'contents'),
-    State('main-upload-comp', 'style'),
-    prevent_initial_call=True
-)
-def update_upload_style(contents, current_style):
-    if contents:
-        # Add success styling when file is uploaded
-        return {**current_style,
-                'borderColor': '#28a745',
-                'backgroundColor': '#f8fff8'}
-    return current_style
-
-
-# ── CALLBACK 9: Advanced Analytics & PDF Report ───────────────────────────
-
-@app.callback(
-    Output('download-results', 'data', allow_duplicate=True),
-    Output('integrity-display', 'children'),
-    Input('download-pdf-btn', 'n_clicks'),
-    State('dge-data-store', 'data'),
-    State('gsea-store', 'data'),
-    State('gsea-results-store', 'data'),
-    prevent_initial_call=True
-)
-def generate_analysis_report(n_clicks, data_store, gsea_store, gsea_results):
-    if not n_clicks or not data_store:
-        return dash.no_update, dash.no_update
-
-    try:
-        df = pd.DataFrame(data_store)
-        if df.empty:
-            return dash.no_update, 'No data loaded to generate report.'
-
-        integrity = compute_data_integrity_score(df)
-        analysis_params = {
-            'lfc_thresh': 1.0,
-            'padj_thresh': 0.05,
-            'gene_sets': ['KEGG_2021_Human', 'Reactome_2022']
-        }
-
-        pdf_bytes = generate_pdf_report(
-            df,
-            integrity,
-            gsea_results if gsea_results else {},
-            gsea_store if gsea_store else {},
-            analysis_params
+        log.error(f"cb_ingest error on {fname}: {e}")
+        return dash.no_update, dbc.Alert(
+            f"❌ Could not parse {fname}: {e}", color="danger", dismissable=True,
         )
 
-        integrity_text = (
-            f"Integrity: {integrity['total']}/100 ({integrity['grade']}) "
-            f"| {integrity['n_significant']} significant genes"
-        )
 
-        return (
-            dcc.send_bytes(pdf_bytes,
-                           filename=f'analysis_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf'),
-            integrity_text
-        )
-
-    except Exception as e:
-        logger.error(f"PDF report error: {e}", exc_info=True)
-        return dash.no_update, f"Report generation failed: {str(e)[:200]}"
-
-
-# ── CALLBACK 10: Gene Metadata Lookup ─────────────────────────────────────
-
+# ── Summary banner ────────────────────────────────────────────────────────────
 @app.callback(
-    Output('gene-info-panel', 'children'),
-    Input('lookup-gene-btn', 'n_clicks'),
-    State('gene-search-input', 'value'),
-    prevent_initial_call=True
+    Output("banner", "children"),
+    Input("store", "data"),
+    Input("lfc-thresh", "value"),
+    Input("p-thresh", "value"),
 )
-def lookup_gene_metadata(n_clicks, gene_symbol):
-    if not n_clicks or not gene_symbol:
-        return ''
+def cb_banner(rec, lfc_t, p_t):
+    df = _s2df(rec)
+    if df.empty:
+        return [html.Span("Upload a DGE CSV to begin analysis",
+                          className="text-muted small align-self-center")]
+    n   = len(df)   # Total Genes  = full dataset regardless of thresholds
+    up  = int(((df["log2FC"] >  lfc_t) & (df["padj"] < p_t)).sum())
+    dn  = int(((df["log2FC"] < -lfc_t) & (df["padj"] < p_t)).sum())
+    sig = up + dn   # Significant Genes = passing the UI sliders only
 
-    info = fetch_gene_info(gene_symbol.strip())
-    if not info or 'error' in info:
-        message = info.get('error', 'Gene lookup failed.') if isinstance(info, dict) else 'Gene lookup failed.'
-        return html.Div(message, style={'color': '#c0392b', 'fontSize': '12px'})
+    # Count drug targets among significant genes
+    sig_genes = df.loc[
+        (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t), "symbol"
+    ].str.upper().tolist()
+    from data.gene_annotations import DRUG_GENE_INTERACTIONS
+    n_drug = sum(1 for g in sig_genes if g in DRUG_GENE_INTERACTIONS)
 
-    details = [
-        html.P(f"Symbol: {gene_symbol.upper()}", style={'margin': '0 0 4px 0', 'fontWeight': '600'}),
-        html.P(f"Full Name: {info.get('full_name', 'N/A')}", style={'margin': '0 0 4px 0'}),
-        html.P(f"Location: {info.get('location', 'N/A')}", style={'margin': '0 0 4px 0'}),
-        html.P(f"Subcellular Location: {info.get('subcellular_location', 'N/A')}", style={'margin': '0 0 4px 0'}),
-        html.P(f"Function: {info.get('function', 'N/A')}", style={'margin': '0 0 4px 0'}),
-        html.P(f"NCBI ID: {info.get('ncbi_id', 'N/A')} | UniProt ID: {info.get('uniprot_id', 'N/A')}", style={'margin': '0 0 4px 0'})
+    def card(lbl, val, bg):
+        return html.Div([
+            html.Div(str(val), style={"fontSize": 20, "fontWeight": "bold", "color": "white"}),
+            html.Div(lbl,      style={"fontSize": 10, "color": "rgba(255,255,255,.85)"}),
+        ], style={"background": bg, "borderRadius": 6, "padding": "6px 14px",
+                  "minWidth": 95, "textAlign": "center"})
+
+    return [
+        card("Total Genes",      n,      "#2c3e50"),
+        card("⬆ Up-regulated",   up,     "#c0392b"),
+        card("⬇ Down-regulated", dn,     "#2980b9"),
+        card("Significant Genes", sig,    "#27ae60"),
+        card("💊 Drug Targets",  n_drug, "#8e44ad"),
+        html.Div(f"|Log2FC| ≥ {lfc_t}  p ≤ {p_t}",
+                 className="align-self-center small text-muted ms-2"),
     ]
 
-    if info.get('domains'):
-        details.append(html.P(f"Domains: {', '.join(info.get('domains', []))}", style={'margin': '0 0 4px 0'}))
-    if info.get('disease_associations'):
-        details.append(html.P(f"Disease associations: {', '.join(info.get('disease_associations', []))}", style={'margin': '0 0 4px 0'}))
 
-    return html.Div(details, style={'fontSize': '12px', 'lineHeight': '1.4'})
-
-
-# ── CALLBACK 11: Session Management - Save Session Modal ──────────────────
-
+# ── Meta-Score tab ────────────────────────────────────────────────────────────
 @app.callback(
-    Output("save-session-modal", "is_open"),
-    Input("save-session-btn", "n_clicks"),
-    Input("save-session-cancel", "n_clicks"),
-    Input("save-session-confirm", "n_clicks"),
-    State("save-session-modal", "is_open"),
-    prevent_initial_call=True
+    Output("meta-bar", "figure"),
+    Output("meta-table", "children"),
+    Input("store", "data"),
 )
-def toggle_save_session_modal(save_clicks, cancel_clicks, confirm_clicks, is_open):
-    if not ctx.triggered:
-        return is_open
-    
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    
-    if trigger_id == "save-session-confirm":
-        return False
-    return not is_open if trigger_id == "save-session-btn" else is_open
-
-
-# ── CALLBACK 12: Session Management - Perform Save ──────────────────────────
-
-@app.callback(
-    Output('main-alert', 'children'),
-    Output('main-alert', 'color'),
-    Output('main-alert', 'is_open'),
-    Output('session-name-input', 'value'),
-    Output('session-desc-input', 'value'),
-    Input("save-session-confirm", "n_clicks"),
-    State('session-name-input', 'value'),
-    State('session-desc-input', 'value'),
-    State('dge-data-store', 'data'),
-    State('gsea-results-store', 'data'),
-    State('volcano-filter-genes', 'data'),
-    State('lfc-thresh-slider', 'value'),
-    State('padj-thresh-dd', 'value'),
-    prevent_initial_call=True
-)
-def save_session(n_clicks, session_name, description, dge_data, gsea_results, selected_genes, lfc_thresh, padj_thresh):
-    if not n_clicks or not session_name or session_name.strip() == '':
-        return 'Session name is required', 'danger', True, session_name or '', description or ''
-    
+def cb_meta(rec):
     try:
-        session_mgr = get_session_manager()
-        
-        # Prepare session data
-        session_data = {
-            'data': pd.DataFrame(dge_data) if dge_data else pd.DataFrame(),
-            'parameters': {
-                'log2_fold_change': lfc_thresh,
-                'adjusted_p_value': padj_thresh
-            },
-            'enrichment_results': pd.DataFrame(gsea_results) if isinstance(gsea_results, list) else {},
-            'selected_genes': selected_genes or [],
-            'metadata': {
-                'description': description or '',
-                'data_rows': len(dge_data) if dge_data else 0,
-                'selected_genes_count': len(selected_genes) if selected_genes else 0
-            }
-        }
-        
-        result = session_mgr.save_session(session_name.strip(), session_data)
-        
-        if result['success']:
-            return result['message'], 'success', True, '', ''
+        df     = _s2df(rec)
+        scored = compute_meta_score(df)
+        fig    = create_meta_score_bar(scored)
+        filt   = scored[~scored["symbol"].isin(HOUSEKEEP)].sort_values(
+            "meta_score", ascending=False
+        )
+        d = filt[["symbol", "log2FC", "padj", "meta_score"]].head(25).copy()
+        d["log2FC"]     = d["log2FC"].map("{:+.3f}".format)
+        d["padj"]       = d["padj"].map("{:.2e}".format)
+        d["meta_score"] = d["meta_score"].map("{:.1f}".format)
+        tbl = dash_table.DataTable(
+            data=d.to_dict("records"),
+            columns=[{"name": h, "id": i} for h, i in
+                     [("Gene", "symbol"), ("Log2FC", "log2FC"),
+                      ("Adj.P", "padj"), ("Score", "meta_score")]],
+            style_table={"maxHeight": "460px", "overflowY": "auto"},
+            style_cell={"fontSize": 12, "padding": "4px 10px", "textAlign": "left"},
+            style_header={"backgroundColor": "#1a5276", "color": "white",
+                          "fontWeight": "bold"},
+            style_data_conditional=[
+                {"if": {"row_index": "odd"}, "backgroundColor": "#f4f6f7"},
+                {"if": {"filter_query": "{meta_score} >= 70",
+                        "column_id": "meta_score"},
+                 "backgroundColor": "#d5f5e3", "color": "#1e8449", "fontWeight": "bold"},
+            ],
+            page_size=25,
+        )
+        return fig, tbl
+    except Exception as e:
+        log.error(f"meta: {e}")
+        return blank(str(e)), html.P(str(e), className="text-danger small")
+
+
+# ── Volcano figure (redraws only on data/threshold changes, NOT on selection) ─
+@app.callback(
+    Output("volcano", "figure"),
+    Input("store", "data"),
+    Input("lfc-thresh", "value"),
+    Input("p-thresh", "value"),
+    Input("tabs", "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_volcano_fig(rec, lfc_t, p_t, active_tab):
+    if active_tab != "tab-volcano":
+        return dash.no_update
+    try:
+        return create_volcano_plot(_s2df(rec), "log2FC", "padj", "symbol", lfc_t, p_t)
+    except Exception as e:
+        log.error(f"volcano_fig: {e}")
+        return blank(str(e))
+
+
+# ── Enrichment (triggered by lasso OR data/threshold changes) ─────────────────
+@app.callback(
+    Output("bubble",     "figure"),
+    Output("path-bar",   "figure"),
+    Output("path-table", "children"),
+    Output("enr-store",  "data"),
+    Output("sel-counter","children"),
+    Input("store",       "data"),
+    Input("lfc-thresh",  "value"),
+    Input("p-thresh",    "value"),
+    Input("pathway-db",  "value"),
+    Input("volcano",     "selectedData"),
+    Input("tabs",        "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
+    if active_tab != "tab-volcano":
+        return (dash.no_update,) * 5
+    try:
+        df      = _s2df(rec)
+        lasso   = bool(sel and sel.get("points"))
+
+        if lasso:
+            genes = list(dict.fromkeys(
+                str(pt["customdata"][0]) for pt in sel["points"]
+                if pt.get("customdata")
+            ))
         else:
-            return result['message'], 'danger', True, session_name or '', description or ''
-    
-    except Exception as e:
-        logger.error(f"Error saving session: {str(e)}")
-        return f'Error saving session: {str(e)}', 'danger', True, session_name or '', description or ''
+            mask  = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
+            genes = df.loc[mask, "symbol"].str.upper().tolist()
 
+        # Build gene → LFC/NLP maps for activation z-score + effect-weighted score
+        ref = df.copy()
+        ref["_sym"] = ref["symbol"].str.strip().str.upper()
+        ref["_nlp"] = -np.log10(ref["padj"].clip(lower=1e-300))
+        gene_lfc_map = ref.set_index("_sym")["log2FC"].to_dict()
+        gene_nlp_map = ref.set_index("_sym")["_nlp"].to_dict()
 
-# ── CALLBACK 13: Session Management - Load Session Modal ──────────────────
+        enr = _run_enrichment(genes, db, gene_lfc_map, gene_nlp_map)
 
-@app.callback(
-    Output("load-session-modal", "is_open"),
-    Output('sessions-list-container', 'children'),
-    Input("load-session-btn", "n_clicks"),
-    Input("load-session-cancel", "n_clicks"),
-    State("load-session-modal", "is_open"),
-    prevent_initial_call=True
-)
-def toggle_load_session_modal(load_clicks, cancel_clicks, is_open):
-    if not ctx.triggered:
-        return is_open, []
-    
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    
-    if trigger_id == "load-session-btn":
-        # Build sessions list
-        session_mgr = get_session_manager()
-        sessions = session_mgr.list_sessions()
-        
-        if not sessions:
-            sessions_ui = dbc.Alert("No saved sessions found", color="info")
-        else:
-            sessions_ui = dbc.ListGroup([
-                dbc.ListGroupItem([
-                    html.Div([
-                        html.H6(s['name'], style={'marginBottom': '4px', 'fontWeight': '600'}),
-                        html.Small(f"Saved: {s['timestamp']} | Genes: {s['gene_count']}", style={'color': '#666'}),
-                        html.Small(s['description']) if s['description'] else None,
-                        dbc.Button('Load', id={'type': 'load-session-btn-item', 'index': s['name']}, 
-                                  color='primary', size='sm', className='mt-2')
-                    ])
-                ]) for s in sessions
-            ])
-        
-        return True, sessions_ui
-    
-    return not is_open if trigger_id == "load-session-btn" else is_open, []
-
-
-# ── CALLBACK 14: Session Management - Perform Load ──────────────────────────
-
-@app.callback(
-    Output('dge-data-store', 'data'),
-    Output('lfc-thresh-slider', 'value'),
-    Output('padj-thresh-dd', 'value'),
-    Output('volcano-filter-genes', 'data'),
-    Output('main-alert', 'children'),
-    Output('main-alert', 'color'),
-    Output('main-alert', 'is_open'),
-    Input({'type': 'load-session-btn-item', 'index': ALL}, 'n_clicks'),
-    prevent_initial_call=True
-)
-def load_selected_session(n_clicks_list):
-    if not ctx.triggered or not any(n_clicks_list or []):
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, '', 'info', False
-    
-    try:
-        session_name = ctx.triggered[0]["prop_id"].split('"index":"')[1].split('"')[0]
-        session_mgr = get_session_manager()
-        
-        session_data, status = session_mgr.load_session(session_name)
-        
-        if not status['success']:
-            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, status['message'], 'danger', True
-        
-        # Extract data
-        dge_data = session_data['data'].to_dict('records') if not session_data['data'].empty else []
-        params = session_data.get('parameters', {})
-        selected_genes = session_data.get('selected_genes', [])
-        
-        msg = f"Session '{session_name}' loaded successfully ({len(selected_genes)} selected genes)"
-        return dge_data, params.get('log2_fold_change', 1.0), params.get('adjusted_p_value', 0.05), selected_genes, msg, 'success', True
-    
-    except Exception as e:
-        logger.error(f"Error loading session: {str(e)}")
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'Error loading session: {str(e)}', 'danger', True
-
-
-# ── CALLBACK 15: Export - Show Export Options Modal ────────────────────────
-
-@app.callback(
-    Output("export-options-modal", "is_open"),
-    Input("export-btn", "n_clicks"),
-    Input("export-modal-close", "n_clicks"),
-    State("export-options-modal", "is_open"),
-    prevent_initial_call=True
-)
-def toggle_export_modal(export_clicks, close_clicks, is_open):
-    if not ctx.triggered:
-        return is_open
-    
-    return not is_open
-
-
-# ── CALLBACK 16: Export - Excel Format ──────────────────────────────────────
-
-@app.callback(
-    Output('download-excel', 'data'),
-    Output('export-status-message', 'children'),
-    Input('export-excel-btn', 'n_clicks'),
-    State('dge-data-store', 'data'),
-    State('gsea-results-store', 'data'),
-    State('volcano-filter-genes', 'data'),
-    State('lfc-thresh-slider', 'value'),
-    State('padj-thresh-dd', 'value'),
-    State('integrity-store', 'data'),
-    prevent_initial_call=True
-)
-def export_excel(n_clicks, gene_data, enrichment_results, selected_genes, lfc_thresh, padj_thresh, integrity_data):
-    if not n_clicks:
-        return dash.no_update, ''
-    
-    try:
-        exporter = get_exporter()
-        gene_df = pd.DataFrame(gene_data) if gene_data else pd.DataFrame()
-        
-        excel_bytes = exporter.export_to_excel(
-            gene_df,
-            pd.DataFrame(enrichment_results) if isinstance(enrichment_results, list) else enrichment_results,
-            selected_genes or [],
-            {'log2_fold_change': lfc_thresh, 'adjusted_p_value': padj_thresh},
-            integrity_data or {}
-        )
-        
-        filename = f'gene_analysis_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
-        status_msg = dbc.Alert(
-            [html.I(className="fas fa-check-circle", style={'marginRight': '8px'}),
-             f"✅ Excel exported successfully as {filename}"],
-            color="success", dismissable=True
-        )
-        return dcc.send_bytes(excel_bytes, filename), status_msg
-    
-    except ImportError as e:
-        status_msg = dbc.Alert(
-            [html.I(className="fas fa-exclamation-triangle", style={'marginRight': '8px'}),
-             "Note: Excel export requires openpyxl. Try JSON or CSV format instead."],
-            color="warning", dismissable=True
-        )
-        return dash.no_update, status_msg
-    except Exception as e:
-        logger.error(f"Export error: {str(e)}")
-        status_msg = dbc.Alert(
-            f"Export failed: {str(e)[:100]}",
-            color="danger", dismissable=True
-        )
-        return dash.no_update, status_msg
-
-
-# ── CALLBACK 17: Export - JSON Format ───────────────────────────────────────
-
-@app.callback(
-    Output('download-json', 'data'),
-    Input('export-json-btn', 'n_clicks'),
-    State('dge-data-store', 'data'),
-    State('gsea-results-store', 'data'),
-    State('volcano-filter-genes', 'data'),
-    State('lfc-thresh-slider', 'value'),
-    State('padj-thresh-dd', 'value'),
-    State('integrity-store', 'data'),
-    prevent_initial_call=True
-)
-def export_json(n_clicks, gene_data, enrichment_results, selected_genes, lfc_thresh, padj_thresh, integrity_data):
-    if not n_clicks:
-        return dash.no_update
-    
-    try:
-        exporter = get_exporter()
-        gene_df = pd.DataFrame(gene_data) if gene_data else pd.DataFrame()
-        
-        json_bytes = exporter.export_to_json(
-            gene_df,
-            pd.DataFrame(enrichment_results) if isinstance(enrichment_results, list) else enrichment_results,
-            selected_genes or [],
-            {'log2_fold_change': lfc_thresh, 'adjusted_p_value': padj_thresh},
-            integrity_data or {}
-        )
-        
-        filename = f'gene_analysis_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
-        return dcc.send_bytes(json_bytes, filename)
-    
-    except Exception as e:
-        logger.error(f"JSON export error: {str(e)}")
-        return dash.no_update
-
-
-# ── CALLBACK 18: Export - CSV Format ────────────────────────────────────────
-
-@app.callback(
-    Output('download-enrich-csv', 'data'),
-    Input('export-csv-btn', 'n_clicks'),
-    State('gsea-results-store', 'data'),
-    prevent_initial_call=True
-)
-def export_csv(n_clicks, enrichment_results):
-    if not n_clicks:
-        return dash.no_update
-    
-    try:
-        exporter = get_exporter()
-        csv_bytes = exporter.export_enrichment_csv(enrichment_results)
-        filename = f'enrichment_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
-        return dcc.send_bytes(csv_bytes, filename)
-    
-    except Exception as e:
-        logger.error(f"CSV export error: {str(e)}")
-        return dash.no_update
-
-
-# ── CALLBACK 19: Progress Indicator Update ──────────────────────────────────
-
-@app.callback(
-    Output('progress-indicator-panel', 'children'),
-    Input('progress-update-interval', 'n_intervals'),
-    State('progress-active-store', 'data'),
-    prevent_initial_call=True
-)
-def update_progress_indicator(n_intervals, progress_data):
-    """Update progress indicator every 500ms"""
-    if not progress_data:
-        return html.Div()  # Return empty div instead of string
-    
-    active_op = progress_data.get('active_operation')
-    last_op = progress_data.get('last_operation')
-    
-    if not active_op or active_op != last_op:
-        # No active operation or it changed
-        return html.Div()
-    
-    try:
-        tracker = get_progress_tracker(active_op)
-        if not tracker:
-            return html.Div()
-            
-        summary = tracker.get_summary()
-        if not summary or summary.get('progress_percentage', 0) == 100:
-            return html.Div()
-        
-        # Generate progress HTML
-        progress_html = html.Div([
-            html.Div([
-                html.Span(f"⏳ {summary.get('operation', active_op)}", style={'fontWeight': '600', 'fontSize': '12px'}),
-                html.Span(f"{summary['progress_percentage']}%", 
-                         style={'float': 'right', 'fontSize': '11px', 'color': '#666'})
-            ], style={'marginBottom': '6px', 'display': 'flex', 'justifyContent': 'space-between'}),
-            dbc.Progress(value=summary['progress_percentage'], style={'height': '6px', 'marginBottom': '6px'}),
-            html.Div([
-                html.Span(
-                    f"• {step['name']}" + 
-                    (" ✓" if step['status'] == 'completed' else 
-                     " ⊙" if step['status'] == 'running' else 
-                     " ⊗" if step['status'] == 'error' else " ◯"),
-                    style={
-                        'fontSize': '10px',
-                        'color': {
-                            'completed': '#4CAF50',
-                            'running': '#FF9800',
-                            'error': '#f44336',
-                            'pending': '#999'
-                        }.get(step['status'], '#999'),
-                        'display': 'block',
-                        'marginBottom': '2px'
-                    }
-                ) for step in summary['steps'][-3:]  # Show last 3 steps
-            ], style={'fontSize': '10px'})
-        ], style={'padding': '8px'})
-        
-        return progress_html
-    
-    except Exception as e:
-        logger.debug(f"Progress update error: {str(e)}")
-        return html.Div()
-
-
-# ── CALLBACK 20: Batch Mode - Toggle Section ───────────────────────────────
-
-@app.callback(
-    Output("batch-mode-section", "is_open"),
-    Input("toggle-batch-mode-btn", "n_clicks"),
-    State("batch-mode-section", "is_open"),
-    prevent_initial_call=True
-)
-def toggle_batch_mode(n_clicks, is_open):
-    if not n_clicks:
-        return is_open
-    return not is_open
-
-
-# ── CALLBACK 21: Batch Mode - Process Files ─────────────────────────────────
-
-@app.callback(
-    Output("batch-results-modal", "is_open"),
-    Output("batch-comparison-table", "children"),
-    Output("batch-overlap-analysis", "children"),
-    Output("batch-errors-panel", "children"),
-    Output("batch-process-status", "children"),
-    Input("process-batch-btn", "n_clicks"),
-    State("batch-file-upload", "contents"),
-    State("batch-file-upload", "filename"),
-    State("lfc-thresh-slider", "value"),
-    State("padj-thresh-dd", "value"),
-    prevent_initial_call=True
-)
-def process_batch_files(n_clicks, contents, filenames, lfc_thresh, padj_thresh):
-    if not n_clicks or not contents:
-        return False, '', '', '', 'No files uploaded'
-    
-    try:
-        import hashlib
-        job_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:8]
-        batch_analyzer = get_batch_analyzer()
-        
-        # Parse uploaded files
-        files_metadata = []
-        for content, filename in zip(contents, filenames or []):
-            try:
-                content_type, content_string = content.split(',')
-                decoded = base64.b64decode(content_string)
-                df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
-                files_metadata.append({'filename': filename, 'data': df})
-            except Exception as e:
-                logger.error(f"Error parsing {filename}: {str(e)}")
-        
-        if not files_metadata:
-            return False, '', '', 'No valid files parsed', dbc.Alert('Error: No valid CSV files found', color='danger')
-        
-        # Create batch job
-        job = batch_analyzer.create_batch_job(job_id, files_metadata)
-        
-        # Process batch
-        params = {
-            'log2_fold_change': lfc_thresh,
-            'adjusted_p_value': padj_thresh
-        }
-        job_status = batch_analyzer.process_files(job_id, validate_deg_data, params)
-        
-        # Get comparison analysis
-        comparison_data = batch_analyzer.get_comparison_analysis(job_id)
-        
-        # Build result displays
-        if comparison_data.get('error'):
-            return False, dbc.Alert(comparison_data['error'], color='danger'), '', '', dbc.Alert('Processing completed with errors', color='warning')
-        
-        # Comparison table
-        comparison_df = pd.DataFrame(comparison_data.get('comparison_table', []))
-        comparison_table = dbc.Table.from_dataframe(comparison_df, striped=True, bordered=True, hover=True)
-        
-        # Overlap analysis
-        overlaps = comparison_data.get('overlap_analysis', {})
-        overlap_elements = []
-        for pair, overlap_data in overlaps.items():
-            overlap_elements.append(
-                html.Div([
-                    html.H6(f"⊆ {pair}", style={'marginBottom': '6px'}),
-                    html.P(f"Intersection: {overlap_data['intersection']} genes | "
-                           f"Jaccard Similarity: {overlap_data['jaccard']:.2%}",
-                          style={'fontSize': '12px', 'marginBottom': '6px'}),
-                    html.Small(f"Sample genes: {', '.join(overlap_data['genes'][:5])}...")
-                ], style={'padding': '8px', 'borderLeft': '3px solid #1565c0', 'marginBottom': '8px'})
+        # Selection badge
+        if lasso:
+            chips = [
+                dbc.Badge(g, color="primary", className="me-1", style={"fontSize": 10})
+                for g in genes[:20]
+            ]
+            overflow = (
+                [html.Small(f"…+{len(genes)-20} more", className="text-muted")]
+                if len(genes) > 20 else []
             )
-        
-        # Error summary
-        errors_summary = []
-        for filename, result in job.results.items():
-            if result.get('status') in ['failed', 'error']:
-                errors_summary.append(
-                    dbc.Alert([
-                        html.Strong(filename),
-                        html.Br(),
-                        html.Small(result.get('error', 'Unknown error'))
-                    ], color='danger')
-                )
-            elif result.get('warnings'):
-                errors_summary.append(
-                    dbc.Alert([
-                        html.Strong(filename),
-                        html.Br(),
-                        html.Small('; '.join(result['warnings']))
-                    ], color='warning')
-                )
-        
-        status_msg = dbc.Alert([
-            html.I(className="fas fa-check-circle", style={'marginRight': '8px'}),
-            f"✅ Batch processed: {job_status['completed_files']}/{job_status['files_count']} files completed"
-        ], color='success')
-        
-        return True, comparison_table, html.Div(overlap_elements) if overlap_elements else html.P('No significant overlaps'), html.Div(errors_summary) if errors_summary else html.P('All files processed successfully'), status_msg
-    
+            counter = html.Div([
+                html.Span(f"🔬 {len(genes)} genes selected  ",
+                          className="fw-bold text-primary small"),
+                *chips, *overflow,
+                html.Br(),
+                html.Small("Enrichment running on this subset ↓",
+                           className="text-muted fst-italic"),
+            ])
+        else:
+            counter = html.Small(
+                f"Showing all {len(genes)} significant genes "
+                "(lasso/box-select the volcano to analyse a subset)",
+                className="text-muted",
+            )
+
+        return (
+            create_pathway_bubble(enr),
+            create_pathway_bar(enr),
+            _enr_table(enr),
+            enr.to_dict("records") if not enr.empty else [],
+            counter,
+        )
     except Exception as e:
-        logger.error(f"Batch processing error: {str(e)}")
-        return False, '', '', '', dbc.Alert(f'Error: {str(e)[:100]}', color='danger')
+        log.error(f"volcano_enr: {e}")
+        emp = blank(str(e))
+        return emp, emp, html.P(str(e), className="text-danger"), [], ""
 
 
-# ── CALLBACK 22: Batch Mode - Close Modal ──────────────────────────────────
+# ── Crosstalk heatmap (driven by enr-store so it's a separate callback) ────────
+@app.callback(
+    Output("crosstalk", "figure"),
+    Input("enr-store",  "data"),
+    Input("tabs",       "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_crosstalk(records, active_tab):
+    if active_tab != "tab-volcano":
+        return dash.no_update
+    try:
+        import pandas as pd
+        from modules.analysis import compute_pathway_crosstalk
+        enr = pd.DataFrame(records) if records else pd.DataFrame()
+        ct_df = compute_pathway_crosstalk(enr)
+        return create_pathway_crosstalk(ct_df)
+    except Exception as e:
+        log.error(f"crosstalk: {e}")
+        return blank(str(e))
+
+
+# ── 3D PCA ────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output("pca", "figure"),
+    Output("pca-info", "children"),
+    Input("store", "data"),
+    Input("tabs", "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_pca(rec, active_tab):
+    if active_tab != "tab-pca":
+        return dash.no_update, dash.no_update
+    try:
+        res = run_pca_3d(_s2df(rec))
+        if "error" in res:
+            return blank(res["error"]), res["error"]
+        v = res["explained_variance"]
+        return create_pca_3d(res), (
+            f"{res['n_clusters']} clusters  |  variance: "
+            f"PC1 {v[0]:.1f}%  PC2 {v[1]:.1f}%  PC3 {v[2]:.1f}%  "
+            f"|  {len(res['genes'])} genes"
+        )
+    except Exception as e:
+        log.error(f"pca: {e}")
+        return blank(str(e)), str(e)
+
+
+# ── Advanced Analytics ────────────────────────────────────────────────────────
+@app.callback(
+    Output("ma-plot",   "figure"),
+    Output("heatmap",   "figure"),
+    Output("pval-hist", "figure"),
+    Output("lfc-dist",  "figure"),
+    Output("rank-plot", "figure"),
+    Input("store",      "data"),
+    Input("lfc-thresh", "value"),
+    Input("p-thresh",   "value"),
+    Input("tabs",       "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_advanced(rec, lfc_t, p_t, active_tab):
+    if active_tab != "tab-adv":
+        return (dash.no_update,) * 5
+    try:
+        df = _s2df(rec)
+        return (
+            create_ma_plot(df),
+            create_top_heatmap(df, lfc_t, p_t),
+            create_pval_hist(df),
+            create_lfc_dist(df),
+            create_rank_metric(df),
+        )
+    except Exception as e:
+        log.error(f"adv: {e}")
+        f = blank(str(e))
+        return f, f, f, f, f
+
+
+# ── GSEA ──────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output("gsea-bar",   "figure"),
+    Output("gsea-table", "children"),
+    Input("store", "data"),
+    Input("tabs",  "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_gsea(rec, active_tab):
+    if active_tab != "tab-gsea":
+        return dash.no_update, dash.no_update
+    try:
+        df  = _s2df(rec)
+        res = run_gsea_preranked(df)
+        if res.get("error"):
+            return blank(f"GSEA: {res['error']}"), html.P(res["error"], className="text-muted small")
+        results = res["results"]
+        if results.empty:
+            return blank("No GSEA results (FDR < 0.25)."), html.P("No results.", className="text-muted small")
+        top = results.head(15)
+        sc  = "NES" if "NES" in top.columns else top.columns[0]
+        tm  = "Term" if "Term" in top.columns else top.columns[min(1, len(top.columns)-1)]
+        fig = go.Figure(go.Bar(
+            x=top[sc], y=top[tm].str[:50], orientation="h",
+            marker=dict(
+                color=top[sc], colorscale="RdBu", reversescale=True,
+                cmin=-top[sc].abs().max(), cmax=top[sc].abs().max(),
+                showscale=True, colorbar=dict(title="NES", thickness=12),
+            ),
+            hovertemplate="<b>%{y}</b><br>NES: %{x:.3f}<extra></extra>",
+        ))
+        fig.update_layout(
+            template="simple_white", title="GSEA Pre-ranked — Top Pathways",
+            xaxis_title="Normalized Enrichment Score (NES)",
+            yaxis=dict(autorange="reversed"),
+            height=400, margin=dict(l=10, r=10, t=45, b=30),
+        )
+        disp_cols = [c for c in ["Term", "NES", "FDR q-val", "Gene %"] if c in top.columns]
+        tbl = dash_table.DataTable(
+            data=top[disp_cols].to_dict("records"),
+            columns=[{"name": c, "id": c} for c in disp_cols],
+            style_table={"maxHeight": "340px", "overflowY": "auto"},
+            style_cell={"fontSize": 11, "padding": "3px 8px"},
+            style_header={"backgroundColor": "#1a5276", "color": "white", "fontWeight": "bold"},
+            page_size=15,
+        )
+        return fig, tbl
+    except Exception as e:
+        log.error(f"gsea: {e}")
+        return blank(str(e)), html.P(str(e), className="text-danger small")
+
+
+# ── Gene Network ──────────────────────────────────────────────────────────────
+@app.callback(
+    Output("network",  "figure"),
+    Output("net-info", "children"),
+    Input("store", "data"),
+    Input("tabs",  "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_network(rec, active_tab):
+    if active_tab != "tab-net":
+        return dash.no_update, dash.no_update
+    try:
+        df  = _s2df(rec)
+        res = run_wgcna_lite(df)
+        if res.get("error"):
+            return blank(res["error"]), res["error"]
+        G = res["graph"]
+        fig = create_network_graph(res)
+        return fig, (
+            f"WGCNA-lite  |  {G.number_of_nodes()} nodes  "
+            f"|  {res['n_edges']} edges  |  {res['n_modules']} modules"
+        )
+    except Exception as e:
+        log.error(f"network: {e}")
+        return blank(str(e)), str(e)
+
+
+# ── Drug Targets tab ──────────────────────────────────────────────────────────
+@app.callback(
+    Output("drug-scatter", "figure"),
+    Output("drug-donut",   "figure"),
+    Output("drug-table",   "children"),
+    Input("store",       "data"),
+    Input("lfc-thresh",  "value"),
+    Input("p-thresh",    "value"),
+    Input("tabs",        "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_drugs(rec, lfc_t, p_t, active_tab):
+    if active_tab != "tab-drugs":
+        return (dash.no_update,) * 3
+    try:
+        df = _s2df(rec)
+        mask = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
+        sig_genes = df.loc[mask, "symbol"].str.upper().tolist()
+
+        drug_df = get_drug_targets(sig_genes)
+
+        scatter = create_drug_target_chart(drug_df, df)
+        donut   = create_drug_type_donut(drug_df)
+
+        if drug_df.empty:
+            tbl = html.P("No FDA-approved drug targets among significant genes.",
+                         className="text-muted small ps-1 mt-2")
+        else:
+            fda = drug_df[drug_df["fda"] == True].copy() if "fda" in drug_df.columns else drug_df
+            cols = [c for c in ["gene", "drug", "type", "indication", "fda"] if c in fda.columns]
+            tbl = dash_table.DataTable(
+                data=fda[cols].to_dict("records"),
+                columns=[{"name": c.title(), "id": c} for c in cols],
+                style_table={"maxHeight": "340px", "overflowY": "auto"},
+                style_cell={"fontSize": 11, "padding": "3px 8px"},
+                style_header={"backgroundColor": "#1a5276", "color": "white",
+                              "fontWeight": "bold", "fontSize": 11},
+                style_data_conditional=[
+                    {"if": {"row_index": "odd"}, "backgroundColor": "#f4f6f7"},
+                    {"if": {"filter_query": "{fda} eq True"},
+                     "backgroundColor": "#d5f5e3"},
+                ],
+                page_size=15,
+            )
+        return scatter, donut, tbl
+    except Exception as e:
+        log.error(f"drugs: {e}")
+        return blank(str(e)), blank(""), html.P(str(e), className="text-danger small")
+
+
+# ── Biomarker Score tab ───────────────────────────────────────────────────────
+@app.callback(
+    Output("bm-chart",     "figure"),
+    Output("cancer-table", "children"),
+    Output("bm-store",     "data"),
+    Input("store",      "data"),
+    Input("tabs",       "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_biomarker(rec, active_tab):
+    if active_tab != "tab-bm":
+        return (dash.no_update,) * 3
+    try:
+        df     = _s2df(rec)
+        bm_df  = compute_biomarker_score(df)
+        fig    = create_biomarker_score_chart(bm_df)
+
+        # Cancer gene table
+        all_genes = df["symbol"].str.upper().tolist()
+        cg_df = get_cancer_gene_info(all_genes)
+        if cg_df.empty:
+            cancer_tbl = html.P("No COSMIC cancer genes found in this dataset.",
+                                className="text-muted small ps-1")
+        else:
+            cancer_tbl = dash_table.DataTable(
+                data=cg_df.to_dict("records"),
+                columns=[{"name": c.replace("_"," ").title(), "id": c} for c in cg_df.columns],
+                style_table={"maxHeight": "440px", "overflowY": "auto"},
+                style_cell={"fontSize": 11, "padding": "3px 8px"},
+                style_header={"backgroundColor": "#1a5276", "color": "white",
+                              "fontWeight": "bold"},
+                style_data_conditional=[
+                    {"if": {"filter_query": "{role} eq 'Oncogene'"},
+                     "backgroundColor": "#fdebd0"},
+                    {"if": {"filter_query": "{role} eq 'TSG'"},
+                     "backgroundColor": "#d6eaf8"},
+                    {"if": {"filter_query": "{tier} eq 1"},
+                     "fontWeight": "bold"},
+                ],
+                page_size=20,
+            )
+        return fig, cancer_tbl, bm_df.to_dict("records")
+    except Exception as e:
+        log.error(f"biomarker: {e}")
+        return blank(str(e)), html.P(str(e), className="text-danger small"), []
+
+
+# ── Auto-Insights tab ─────────────────────────────────────────────────────────
+@app.callback(
+    Output("insights-panel", "children"),
+    Input("store",       "data"),
+    Input("enr-store",   "data"),
+    Input("lfc-thresh",  "value"),
+    Input("p-thresh",    "value"),
+    Input("tabs",        "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_insights(rec, enr_rec, lfc_t, p_t, active_tab):
+    if active_tab != "tab-insights":
+        return dash.no_update
+    try:
+        df     = _s2df(rec)
+        enr_df = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
+        insights = generate_insights(df, enr_df, lfc_t, p_t)
+
+        if not insights:
+            return html.P("No insights generated yet. Run analyses first.",
+                          className="text-muted")
+
+        cards = []
+        for ins in insights:
+            cards.append(
+                dbc.Card([
+                    dbc.CardHeader([
+                        html.Span(ins["icon"] + " ", style={"fontSize": 18}),
+                        html.Strong(ins["title"]),
+                        dbc.Badge(ins["category"], color="secondary",
+                                  className="ms-2", style={"fontSize": 10}),
+                    ]),
+                    dbc.CardBody(
+                        dcc.Markdown(
+                            # Convert basic HTML tags to markdown-ish
+                            ins["body"]
+                            .replace("<strong>", "**").replace("</strong>", "**")
+                            .replace("<em>", "*").replace("</em>", "*")
+                            .replace("<br>", "\n\n")
+                            .replace("<b>", "**").replace("</b>", "**"),
+                            dangerously_allow_html=False,
+                            style={"fontSize": 13},
+                        )
+                    ),
+                ], color=ins["severity"], outline=True, className="mb-3",
+                )
+            )
+        return html.Div(cards)
+    except Exception as e:
+        log.error(f"insights: {e}")
+        return html.P(str(e), className="text-danger small")
+
+
+# ── Gene bio-context ──────────────────────────────────────────────────────────
+@app.callback(
+    Output("gene-panel", "children"),
+    Input("gene-input",  "value"),
+    prevent_initial_call=True,
+)
+def cb_gene(gene):
+    if not gene or len(gene.strip()) < 2:
+        return ""
+    info = fetch_gene_info(gene.strip().upper())
+    if "error" in info:
+        return dbc.Alert(info["error"], color="warning", className="p-1 small")
+    parts = []
+    if info.get("full_name"):
+        parts.append(html.P([html.Strong("Name: "), info["full_name"]], className="mb-1"))
+    if info.get("function"):
+        fn = info["function"]
+        parts.append(html.P([html.Strong("Function: "),
+                              fn[:220] + ("…" if len(fn) > 220 else "")], className="mb-1"))
+    if info.get("subcellular_location"):
+        parts.append(html.P([html.Strong("Location: "),
+                              info["subcellular_location"]], className="mb-1"))
+    if info.get("disease_associations"):
+        parts.append(html.P([html.Strong("Disease: "),
+                              ", ".join(info["disease_associations"][:3])], className="mb-1"))
+    if info.get("uniprot_id"):
+        parts.append(html.Small(
+            f"UniProt {info['uniprot_id']}  NCBI {info.get('ncbi_id','')}",
+            className="text-muted",
+        ))
+    return html.Div(parts)
+
+
+# ── PDF download ──────────────────────────────────────────────────────────────
+@app.callback(
+    Output("dl-pdf",   "data"),
+    Input("btn-pdf",   "n_clicks"),
+    State("volcano",   "figure"),
+    State("pca",       "figure"),
+    State("enr-store", "data"),
+    State("bm-store",  "data"),
+    State("store",     "data"),
+    State("lfc-thresh","value"),
+    State("p-thresh",  "value"),
+    prevent_initial_call=True,
+)
+def cb_pdf(n, vol, pca_f, enr_recs, bm_recs, data_recs, lfc_t, p_t):
+    if not n:
+        return dash.no_update
+    try:
+        df     = _s2df(data_recs)
+        enr_df = pd.DataFrame(enr_recs or [])
+        bm_df  = pd.DataFrame(bm_recs  or [])
+        drug_df = get_drug_targets(
+            df.loc[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t),
+                   "symbol"].str.upper().tolist()
+        )
+
+        up  = int(((df["log2FC"] >  lfc_t) & (df["padj"] < p_t)).sum())
+        dn  = int(((df["log2FC"] < -lfc_t) & (df["padj"] < p_t)).sum())
+        stats = {"total": len(df), "up": up, "down": dn, "sig": up + dn}
+
+        insights = generate_insights(df, enr_df, lfc_t, p_t)
+
+        pdf = generate_pdf_report(
+            go.Figure(vol)   if vol   else None,
+            enr_df,
+            go.Figure(pca_f) if pca_f else None,
+            drug_df=drug_df,
+            insights=insights,
+            summary_stats=stats,
+        )
+        fname = f"Apex_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        return dcc.send_bytes(pdf, fname)
+    except Exception as e:
+        log.error(f"pdf: {e}")
+        return dash.no_update
+
+
+# ── CSV Downloads ─────────────────────────────────────────────────────────────
 
 @app.callback(
-    Output("batch-results-modal", "is_open"),
-    Input("batch-results-close", "n_clicks"),
-    State("batch-results-modal", "is_open"),
-    prevent_initial_call=True
+    Output("dl-meta-csv", "data"),
+    Input("btn-meta-csv", "n_clicks"),
+    State("store", "data"),
+    prevent_initial_call=True,
 )
-def close_batch_modal(n_clicks, is_open):
-    if n_clicks:
-        return False
-    return is_open
+def dl_meta_csv(n, rec):
+    if not n:
+        return dash.no_update
+    df = compute_meta_score(_s2df(rec))
+    cols = [c for c in ["symbol", "log2FC", "padj", "baseMean", "meta_score"] if c in df.columns]
+    return dcc.send_data_frame(df[cols].to_csv, "meta_score.csv", index=False)
 
 
-if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=7860)
+@app.callback(
+    Output("dl-enr-csv", "data"),
+    Input("btn-enr-csv", "n_clicks"),
+    State("enr-store", "data"),
+    prevent_initial_call=True,
+)
+def dl_enr_csv(n, rec):
+    if not n or not rec:
+        return dash.no_update
+    return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "enrichment_results.csv", index=False)
+
+
+@app.callback(
+    Output("dl-drug-csv", "data"),
+    Input("btn-drug-csv", "n_clicks"),
+    State("store", "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh", "value"),
+    prevent_initial_call=True,
+)
+def dl_drug_csv(n, rec, lfc_t, p_t):
+    if not n:
+        return dash.no_update
+    df = _s2df(rec)
+    sig_genes = df.loc[
+        (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t), "symbol"
+    ].str.upper().tolist()
+    drug_df = get_drug_targets(sig_genes)
+    return dcc.send_data_frame(drug_df.to_csv, "drug_targets.csv", index=False)
+
+
+@app.callback(
+    Output("dl-bm-csv", "data"),
+    Input("btn-bm-csv", "n_clicks"),
+    State("bm-store", "data"),
+    prevent_initial_call=True,
+)
+def dl_bm_csv(n, rec):
+    if not n or not rec:
+        return dash.no_update
+    return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "biomarker_scores.csv", index=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    app.run(debug=False, host="0.0.0.0", port=7860)
