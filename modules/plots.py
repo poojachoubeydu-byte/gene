@@ -84,7 +84,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
         if has_base:
             ht += "BaseMean: %{customdata[1]:.1f}"
         ht += "<extra></extra>"
-        fig.add_trace(go.Scattergl(          # WebGL for GPU-accelerated rendering
+        fig.add_trace(go.Scatter(            # SVG — required for customdata in selectedData
             x=sub[logfc_col], y=sub["_nlp"],
             mode="markers", name=cat,
             marker=dict(color=color, size=6, opacity=0.75),
@@ -109,7 +109,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 lambda g: CANCER_GENE_CENSUS.get(g, {}).get("cancer_types", ["?"])[0]
             ).values,
         ])
-        fig.add_trace(go.Scattergl(
+        fig.add_trace(go.Scatter(
             x=onco_up[logfc_col], y=onco_up["_nlp"],
             mode="markers+text",
             name="Oncogene ↑",
@@ -137,7 +137,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 lambda g: CANCER_GENE_CENSUS.get(g, {}).get("cancer_types", ["?"])[0]
             ).values,
         ])
-        fig.add_trace(go.Scattergl(
+        fig.add_trace(go.Scatter(
             x=tsg_dn[logfc_col], y=tsg_dn["_nlp"],
             mode="markers+text",
             name="TSG ↓",
@@ -165,7 +165,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
             drug_sig[gene_col].values,
             np.zeros(len(drug_sig)),
         ])
-        fig.add_trace(go.Scattergl(
+        fig.add_trace(go.Scatter(
             x=drug_sig[logfc_col], y=drug_sig["_nlp"],
             mode="markers",
             name="Drug target",
@@ -197,10 +197,14 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
     fig.update_layout(
         template="simple_white",
         title=dict(text="Volcano Plot  <span style='font-size:11px;color:#888;'>"
-                        "★ Oncogene  ◆ TSG  ○ Drug target</span>", font=dict(size=14)),
+                        "★ Oncogene  ◆ TSG  ○ Drug target  "
+                        "— lasso or box-select to run enrichment</span>",
+                   font=dict(size=14)),
         xaxis_title="Log2 Fold Change",
         yaxis_title="−log10(Adj. p-value)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=11)),
+        dragmode="select",          # default tool = box-select; user can switch to lasso
+        clickmode="event+select",   # enable both click and select events
         margin=dict(t=60),
     )
     return fig

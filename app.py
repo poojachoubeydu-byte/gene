@@ -784,13 +784,32 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
         return (dash.no_update,) * 5
     try:
         df      = _s2df(rec)
-        lasso   = bool(sel and sel.get("points"))
+        lasso = bool(sel and sel.get("points"))
 
         if lasso:
+            pts = sel["points"]
+            # Primary: extract from customdata[0] (gene name stored there)
             genes = list(dict.fromkeys(
-                str(pt["customdata"][0]) for pt in sel["points"]
-                if pt.get("customdata")
+                str(pt["customdata"][0])
+                for pt in pts
+                if pt.get("customdata") and str(pt["customdata"][0]).strip()
+                   and str(pt["customdata"][0]) not in ("0", "0.0", "nan", "")
             ))
+            # Fallback: if customdata missing (e.g. from WebGL traces), match
+            # selected x/y coordinates back to the dataframe
+            if not genes:
+                sel_x = {round(pt["x"], 6) for pt in pts if "x" in pt}
+                sel_y = {round(pt["y"], 6) for pt in pts if "y" in pt}
+                df_tmp = _s2df(rec).copy()
+                df_tmp["_nlp"] = -np.log10(df_tmp["padj"].clip(lower=1e-300))
+                genes = df_tmp[
+                    df_tmp["log2FC"].round(6).isin(sel_x) |
+                    df_tmp["_nlp"].round(6).isin(sel_y)
+                ]["symbol"].astype(str).str.upper().tolist()
+                genes = list(dict.fromkeys(genes))
+                log.info(f"lasso: customdata missing, used xy-fallback → {len(genes)} genes")
+            else:
+                log.info(f"lasso: customdata → {len(genes)} genes")
         else:
             mask  = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
             genes = df.loc[mask, "symbol"].str.upper().tolist()
