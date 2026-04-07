@@ -657,12 +657,11 @@ def cb_volcano_fig(rec, lfc_t, p_t, active_tab):
         return blank(str(e))
 
 
-# ── Enrichment + crosstalk (triggered by lasso OR data/threshold changes) ──────
+# ── Enrichment (triggered by lasso OR data/threshold changes) ─────────────────
 @app.callback(
     Output("bubble",     "figure"),
     Output("path-bar",   "figure"),
     Output("path-table", "children"),
-    Output("crosstalk",  "figure"),
     Output("enr-store",  "data"),
     Output("sel-counter","children"),
     Input("store",       "data"),
@@ -675,7 +674,7 @@ def cb_volcano_fig(rec, lfc_t, p_t, active_tab):
 )
 def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
     if active_tab != "tab-volcano":
-        return (dash.no_update,) * 6
+        return (dash.no_update,) * 5
     try:
         df      = _s2df(rec)
         lasso   = bool(sel and sel.get("points"))
@@ -685,11 +684,9 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
                 str(pt["customdata"][0]) for pt in sel["points"]
                 if pt.get("customdata")
             ))
-            badge_label = f"🔬 {len(genes)} selected"
         else:
             mask  = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
             genes = df.loc[mask, "symbol"].str.upper().tolist()
-            badge_label = None
 
         # Build gene → LFC/NLP maps for activation z-score + effect-weighted score
         ref = df.copy()
@@ -699,11 +696,6 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
         gene_nlp_map = ref.set_index("_sym")["_nlp"].to_dict()
 
         enr = _run_enrichment(genes, db, gene_lfc_map, gene_nlp_map)
-
-        # Crosstalk heatmap
-        from modules.analysis import compute_pathway_crosstalk
-        ct_df  = compute_pathway_crosstalk(enr)
-        ct_fig = create_pathway_crosstalk(ct_df)
 
         # Selection badge
         if lasso:
@@ -734,14 +726,34 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
             create_pathway_bubble(enr),
             create_pathway_bar(enr),
             _enr_table(enr),
-            ct_fig,
             enr.to_dict("records") if not enr.empty else [],
             counter,
         )
     except Exception as e:
         log.error(f"volcano_enr: {e}")
         emp = blank(str(e))
-        return emp, emp, html.P(str(e), className="text-danger"), emp, [], ""
+        return emp, emp, html.P(str(e), className="text-danger"), [], ""
+
+
+# ── Crosstalk heatmap (driven by enr-store so it's a separate callback) ────────
+@app.callback(
+    Output("crosstalk", "figure"),
+    Input("enr-store",  "data"),
+    Input("tabs",       "active_tab"),
+    prevent_initial_call=True,
+)
+def cb_crosstalk(records, active_tab):
+    if active_tab != "tab-volcano":
+        return dash.no_update
+    try:
+        import pandas as pd
+        from modules.analysis import compute_pathway_crosstalk
+        enr = pd.DataFrame(records) if records else pd.DataFrame()
+        ct_df = compute_pathway_crosstalk(enr)
+        return create_pathway_crosstalk(ct_df)
+    except Exception as e:
+        log.error(f"crosstalk: {e}")
+        return blank(str(e))
 
 
 # ── 3D PCA ────────────────────────────────────────────────────────────────────
