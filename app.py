@@ -167,14 +167,39 @@ def _s2df(data) -> pd.DataFrame:
     return _load_demo()
 
 
-def _run_enrichment(sig_genes: list, db_choice: str) -> pd.DataFrame:
+def _run_enrichment(
+    sig_genes: list,
+    db_choice: str,
+    gene_lfc_map: dict | None = None,
+    gene_nlp_map: dict | None = None,
+) -> pd.DataFrame:
+    """
+    Run pathway enrichment and attach activation z-scores + effect-weighted
+    scores when LFC/NLP maps are supplied.
+
+    padj_threshold: 0.05 (v3.0, tightened from 0.5) — returns only
+    statistically reliable pathways by default.  Downstream views still
+    show all returned rows; users see fewer but higher-confidence results.
+    """
     if not sig_genes:
         return pd.DataFrame()
     try:
-        analyzer = _get_analyzer(db_choice)
+        analyzer  = _get_analyzer(db_choice)
+        lfc_map   = gene_lfc_map or {}
+        nlp_map   = gene_nlp_map or {}
         if db_choice == "all":
-            return analyzer.run_multi_enrichment(sig_genes, padj_threshold=0.5)
-        return analyzer.run_enrichment(sig_genes, padj_threshold=0.5)
+            return analyzer.run_multi_enrichment(
+                sig_genes,
+                padj_threshold=0.05,
+                gene_lfc_map=lfc_map,
+                gene_nlp_map=nlp_map,
+            )
+        return analyzer.run_enrichment(
+            sig_genes,
+            padj_threshold=0.05,
+            gene_lfc_map=lfc_map,
+            gene_nlp_map=nlp_map,
+        )
     except Exception as e:
         log.warning(f"Enrichment ({db_choice}): {e}")
         return pd.DataFrame()
@@ -666,7 +691,14 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
             genes = df.loc[mask, "symbol"].str.upper().tolist()
             badge_label = None
 
-        enr = _run_enrichment(genes, db)
+        # Build gene → LFC/NLP maps for activation z-score + effect-weighted score
+        ref = df.copy()
+        ref["_sym"] = ref["symbol"].str.strip().str.upper()
+        ref["_nlp"] = -np.log10(ref["padj"].clip(lower=1e-300))
+        gene_lfc_map = ref.set_index("_sym")["log2FC"].to_dict()
+        gene_nlp_map = ref.set_index("_sym")["_nlp"].to_dict()
+
+        enr = _run_enrichment(genes, db, gene_lfc_map, gene_nlp_map)
 
         # Crosstalk heatmap
         from modules.analysis import compute_pathway_crosstalk

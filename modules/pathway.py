@@ -1,18 +1,26 @@
 """
 Pathway Enrichment Module — Apex Bioinformatics Platform
 =========================================================
-Provides offline-capable enrichment via built-in gene sets
-plus Fisher-exact / hypergeometric testing with FDR correction.
+Provides offline-capable enrichment via built-in gene sets plus
+Fisher-exact testing with FDR correction.
 
-The built-in gene sets cover ~150 pathways across KEGG, GO-BP and Reactome.
+Statistical upgrades (v3.0):
+  • Odds ratio + 95 % CI  (Wald method) for every pathway row
+  • Gene ratio  (overlap / query size)  — like clusterProfiler output
+  • Activation Z-score  (IPA-style directional scoring per pathway)
+  • Effect-weighted enrichment score (Σ |LFC| × −log10p for overlap genes)
+  • Exposed background size in public API (default 20 000)
+  • Exposed padj threshold in public API (default 0.05 for strict mode)
+  • Public helpers: list_databases(), get_pathway_genes()
 """
 
 import logging
-from typing import Dict, List, Optional, Union
+import math
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from scipy.stats import fisher_exact, hypergeom
+from scipy.stats import fisher_exact
 from statsmodels.stats.multitest import multipletests
 
 log = logging.getLogger(__name__)
@@ -103,8 +111,45 @@ _REACTOME: Dict[str, List[str]] = {
 _ALL_DATABASES = {"kegg": _KEGG, "go_bp": _GO_BP, "reactome": _REACTOME}
 
 
+def list_databases() -> List[str]:
+    """Return available database names."""
+    return list(_ALL_DATABASES.keys())
+
+
+def get_pathway_genes(database: str, pathway: str) -> List[str]:
+    """Return gene list for a specific pathway in a database."""
+    return _ALL_DATABASES.get(database, {}).get(pathway, [])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Core enrichment engine
+# Odds-ratio helper  (Wald 95 % CI, log-space)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _odds_ratio_ci(a: int, b: int, c: int, d: int, ci: float = 0.95):
+    """
+    Compute odds ratio and its Wald 95 % confidence interval.
+
+    OR = (a*d) / (b*c)
+    95 % CI: exp(log(OR) ± z × SE)
+    SE = sqrt(1/a + 1/b + 1/c + 1/d)
+
+    Returns (or_val, or_lo, or_hi) — all rounded to 3 dp.
+    All zero-cell corrections: add 0.5 to each cell if any cell == 0.
+    """
+    # Haldane-Anscombe correction for zero cells
+    if 0 in (a, b, c, d):
+        a, b, c, d = a + 0.5, b + 0.5, c + 0.5, d + 0.5
+
+    or_val = (a * d) / (b * c)
+    se     = math.sqrt(1/a + 1/b + 1/c + 1/d)
+    z      = 1.959964  # z_{0.975} for 95 % CI
+    lo     = math.exp(math.log(or_val) - z * se)
+    hi     = math.exp(math.log(or_val) + z * se)
+    return round(or_val, 3), round(lo, 3), round(hi, 3)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core enrichment engine  (v3.0 — with OR, CI, gene ratio, activation z-score)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_enrichment(
@@ -113,38 +158,98 @@ def _run_enrichment(
     db_name: str,
     background: int = 20_000,
     correction: str = "fdr_bh",
+    gene_lfc_map: Optional[Dict[str, float]] = None,
+    gene_nlp_map: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
+    """
+    Core Fisher-exact pathway enrichment with extended output columns.
+
+    New columns vs v2:
+        odds_ratio          — OR from the 2×2 Fisher table
+        or_ci_low           — Lower bound of Wald 95 % CI on OR
+        or_ci_high          — Upper bound of Wald 95 % CI on OR
+        gene_ratio          — overlap_count / query_size  (like clusterProfiler)
+        activation_zscore   — (N_up − N_down) / √N_tot   (IPA-style)
+        direction           — 'Activated' | 'Inhibited' | 'Inconclusive'
+        effect_weighted_score — Σ |LFC| × −log10(padj) for overlap genes
+
+    Args:
+        gene_list      : Query gene symbols (upper-case).
+        pathway_db     : {pathway_name: [gene_symbols]}.
+        db_name        : Label for the 'database' column.
+        background     : Estimated genome-wide gene count for Fisher table.
+        correction     : Multiple-testing method (statsmodels multipletests).
+        gene_lfc_map   : {GENE: log2FC} — enables directional scoring.
+        gene_nlp_map   : {GENE: −log10(padj)} — enables EWS.
+    """
     gene_set = {g.strip().upper() for g in gene_list if g.strip()}
     if not gene_set:
         return pd.DataFrame()
 
+    lfc_map = gene_lfc_map or {}
+    nlp_map = gene_nlp_map or {}
+
     rows = []
     for pw, pw_genes in pathway_db.items():
-        pw_set   = {g.upper() for g in pw_genes}
-        overlap  = gene_set & pw_set
-        n_over   = len(overlap)
+        pw_set  = {g.upper() for g in pw_genes}
+        overlap = gene_set & pw_set
+        n_over  = len(overlap)
         if n_over == 0:
             continue
 
-        # Fisher exact (one-sided, enrichment direction)
+        # 2×2 contingency table
         a = n_over
         b = len(pw_set) - n_over
         c = len(gene_set) - n_over
-        d = background - a - b - c
-        if d < 0:
-            d = 0
+        d = max(0, background - a - b - c)
+
         _, p = fisher_exact([[a, b], [c, d]], alternative="greater")
 
+        # Odds ratio + Wald 95 % CI
+        or_val, or_lo, or_hi = _odds_ratio_ci(a, b, c, max(1, d))
+
+        # Gene ratio (clusterProfiler convention)
+        gene_ratio = round(n_over / max(1, len(gene_set)), 4)
+
+        # Activation z-score (IPA-style)
+        overlap_genes = sorted(overlap)
+        lfc_arr = np.array([lfc_map[g] for g in overlap_genes if g in lfc_map])
+        if len(lfc_arr) > 0:
+            n_up   = int((lfc_arr > 0).sum())
+            n_dn   = int((lfc_arr < 0).sum())
+            n_tot  = n_up + n_dn
+            az     = round((n_up - n_dn) / math.sqrt(n_tot), 3) if n_tot > 0 else 0.0
+            if az >= 2.0:
+                direction = "Activated"
+            elif az <= -2.0:
+                direction = "Inhibited"
+            else:
+                direction = "Inconclusive"
+            # Effect-weighted score
+            ews = round(sum(
+                abs(lfc_map.get(g, 0.0)) * nlp_map.get(g, 0.0)
+                for g in overlap_genes if g in lfc_map
+            ), 2)
+        else:
+            az, direction, ews = 0.0, "Inconclusive", 0.0
+
         rows.append({
-            "pathway":         pw,
-            "database":        db_name,
-            "p_value":         float(p),
-            "adjusted_p_value": float(p),  # placeholder — corrected below
-            "overlap_count":   n_over,
-            "pathway_size":    len(pw_set),
-            "query_size":      len(gene_set),
-            "enrichment_score": -np.log10(p) if p > 0 else 300.0,
-            "genes":           ";".join(sorted(overlap)),
+            "pathway":               pw,
+            "database":              db_name,
+            "p_value":               float(p),
+            "adjusted_p_value":      float(p),   # placeholder — corrected below
+            "overlap_count":         n_over,
+            "pathway_size":          len(pw_set),
+            "query_size":            len(gene_set),
+            "gene_ratio":            gene_ratio,
+            "odds_ratio":            or_val,
+            "or_ci_low":             or_lo,
+            "or_ci_high":            or_hi,
+            "enrichment_score":      (-np.log10(p) if p > 0 else 300.0),
+            "activation_zscore":     az,
+            "direction":             direction,
+            "effect_weighted_score": ews,
+            "genes":                 ";".join(overlap_genes),
         })
 
     if not rows:
@@ -159,34 +264,87 @@ def _run_enrichment(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public API  (mirrors original interface so app.py imports are unchanged)
+# Public API  (backward-compatible; enriches app.py imports unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class EnrichmentAnalyzer:
+    """
+    Single-database enrichment wrapper.
+
+    v3.0 changes:
+    • padj_threshold default tightened to 0.05 (was 0.5 — too permissive).
+    • Accepts gene_lfc_map for activation z-score computation.
+    • Exposes background parameter.
+    """
+
     def __init__(self, database: str = "kegg", species: str = "human"):
         if database not in _ALL_DATABASES:
-            raise ValueError(f"Database '{database}' not available. Choose from {list(_ALL_DATABASES)}")
+            raise ValueError(
+                f"Database '{database}' not available. Choose from {list(_ALL_DATABASES)}"
+            )
         self.database_name = database
         self.pathways      = _ALL_DATABASES[database]
 
-    def run_enrichment(self, gene_list: List[str], padj_threshold: float = 0.5) -> pd.DataFrame:
-        df = _run_enrichment(gene_list, self.pathways, self.database_name)
+    def run_enrichment(
+        self,
+        gene_list: List[str],
+        padj_threshold: float = 0.05,
+        background: int = 20_000,
+        gene_lfc_map: Optional[Dict[str, float]] = None,
+        gene_nlp_map: Optional[Dict[str, float]] = None,
+    ) -> pd.DataFrame:
+        df = _run_enrichment(
+            gene_list, self.pathways, self.database_name,
+            background=background,
+            gene_lfc_map=gene_lfc_map,
+            gene_nlp_map=gene_nlp_map,
+        )
         return df[df["adjusted_p_value"] <= padj_threshold] if not df.empty else df
 
-    def get_enriched_pathways(self, gene_list: List[str], padj_threshold: float = 0.05,
-                              top_n: Optional[int] = None) -> pd.DataFrame:
-        df = self.run_enrichment(gene_list, padj_threshold)
+    def get_enriched_pathways(
+        self,
+        gene_list: List[str],
+        padj_threshold: float = 0.05,
+        top_n: Optional[int] = None,
+        background: int = 20_000,
+        gene_lfc_map: Optional[Dict[str, float]] = None,
+        gene_nlp_map: Optional[Dict[str, float]] = None,
+    ) -> pd.DataFrame:
+        df = self.run_enrichment(
+            gene_list, padj_threshold, background, gene_lfc_map, gene_nlp_map
+        )
         return df.head(top_n) if (top_n and not df.empty) else df
 
 
 class MultiDatabaseEnrichment:
+    """
+    Multi-database enrichment aggregator.
+
+    v3.0 changes:
+    • padj_threshold default tightened to 0.05.
+    • Forwards gene_lfc_map and gene_nlp_map to each sub-analyzer.
+    • Exposes background parameter.
+    """
+
     def __init__(self, databases: List[str] = None, species: str = "human"):
         dbs = databases or ["kegg", "go_bp", "reactome"]
-        self.analyzers = {d: EnrichmentAnalyzer(d, species) for d in dbs if d in _ALL_DATABASES}
+        self.analyzers = {
+            d: EnrichmentAnalyzer(d, species)
+            for d in dbs if d in _ALL_DATABASES
+        }
 
-    def run_multi_enrichment(self, gene_list: List[str], padj_threshold: float = 0.5) -> pd.DataFrame:
+    def run_multi_enrichment(
+        self,
+        gene_list: List[str],
+        padj_threshold: float = 0.05,
+        background: int = 20_000,
+        gene_lfc_map: Optional[Dict[str, float]] = None,
+        gene_nlp_map: Optional[Dict[str, float]] = None,
+    ) -> pd.DataFrame:
         parts = [
-            a.run_enrichment(gene_list, padj_threshold)
+            a.run_enrichment(
+                gene_list, padj_threshold, background, gene_lfc_map, gene_nlp_map
+            )
             for a in self.analyzers.values()
         ]
         parts = [p for p in parts if not p.empty]
