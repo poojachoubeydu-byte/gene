@@ -354,6 +354,12 @@ SIDEBAR = dbc.Col([
         ),
 
         html.Hr(className="my-2"),
+        dbc.Button("🔄 Refresh Current Tab", id="refresh-tab-btn",
+                   color="warning", outline=True, size="sm", className="w-100 mb-2"),
+        dbc.Tooltip("Re-run analysis for the active tab even if results are cached",
+                    target="refresh-tab-btn", placement="right"),
+
+        html.Hr(className="my-2"),
         dbc.Button("📥 Download PDF Report", id="btn-pdf",
                    color="success", size="sm", className="w-100 mb-2"),
         dcc.Download(id="dl-pdf"),
@@ -373,9 +379,15 @@ SIDEBAR = dbc.Col([
 # ─────────────────────────────────────────────────────────────────────────────
 
 MAIN = dbc.Col([
-    dcc.Store(id="store",     storage_type="memory"),  # per-session DEG data
-    dcc.Store(id="enr-store", storage_type="memory"),  # per-session enrichment results
-    dcc.Store(id="bm-store",  storage_type="memory"),  # per-session biomarker scores
+    dcc.Store(id="store",       storage_type="memory"),  # per-session DEG data
+    dcc.Store(id="enr-store",   storage_type="memory"),  # per-session enrichment results
+    dcc.Store(id="bm-store",    storage_type="memory"),  # per-session biomarker scores
+    # ── Result cache fingerprints (cleared on new data / refresh) ──────────────
+    dcc.Store(id="data-fp",     storage_type="memory"),  # hash of current dataset
+    dcc.Store(id="cache-pca",   storage_type="memory"),  # fp when PCA was last computed
+    dcc.Store(id="cache-gsea",  storage_type="memory"),  # fp when GSEA was last computed
+    dcc.Store(id="cache-net",   storage_type="memory"),  # fp when Network was last computed
+    dcc.Store(id="cache-bm",    storage_type="memory"),  # fp when Biomarker was last computed
 
     # Summary banner
     html.Div(id="banner",
@@ -617,6 +629,39 @@ def cb_ingest(contents, fname):
         )
 
 
+# ── Data fingerprint: updated on every new upload, clears all tab caches ──────
+@app.callback(
+    Output("data-fp",    "data"),
+    Output("cache-pca",  "data"),
+    Output("cache-gsea", "data"),
+    Output("cache-net",  "data"),
+    Output("cache-bm",   "data"),
+    Input("store", "data"),
+)
+def cb_update_fp(rec):
+    if not rec:
+        return None, None, None, None, None
+    import hashlib, json as _json
+    sample = rec[:20] if isinstance(rec, list) else []
+    fp = hashlib.md5(
+        _json.dumps(sample, sort_keys=True, default=str).encode()
+    ).hexdigest()[:12]
+    return fp, None, None, None, None  # new fingerprint + wipe all caches
+
+
+# ── Refresh button: force-clears all tab caches ────────────────────────────────
+@app.callback(
+    Output("cache-pca",  "data", allow_duplicate=True),
+    Output("cache-gsea", "data", allow_duplicate=True),
+    Output("cache-net",  "data", allow_duplicate=True),
+    Output("cache-bm",   "data", allow_duplicate=True),
+    Input("refresh-tab-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def cb_refresh_tabs(_):
+    return None, None, None, None
+
+
 # ── Summary banner ────────────────────────────────────────────────────────────
 @app.callback(
     Output("banner", "children"),
@@ -820,28 +865,35 @@ def cb_crosstalk(records, active_tab):
 
 # ── 3D PCA ────────────────────────────────────────────────────────────────────
 @app.callback(
-    Output("pca", "figure"),
+    Output("pca",      "figure"),
     Output("pca-info", "children"),
-    Input("store", "data"),
-    Input("tabs", "active_tab"),
+    Output("cache-pca", "data", allow_duplicate=True),
+    Input("tabs",      "active_tab"),
+    Input("store",     "data"),
+    State("data-fp",   "data"),
+    State("cache-pca", "data"),
     prevent_initial_call=True,
 )
-def cb_pca(rec, active_tab):
+def cb_pca(active_tab, rec, fp, cache_fp):
     if active_tab != "tab-pca":
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
+    if cache_fp and cache_fp == fp:
+        return dash.no_update, dash.no_update, dash.no_update  # already fresh
     try:
         res = run_pca_3d(_s2df(rec))
         if "error" in res:
-            return blank(res["error"]), res["error"]
+            return blank(res["error"]), res["error"], None
         v = res["explained_variance"]
-        return create_pca_3d(res), (
-            f"{res['n_clusters']} clusters  |  variance: "
-            f"PC1 {v[0]:.1f}%  PC2 {v[1]:.1f}%  PC3 {v[2]:.1f}%  "
-            f"|  {len(res['genes'])} genes"
+        return (
+            create_pca_3d(res),
+            (f"{res['n_clusters']} clusters  |  variance: "
+             f"PC1 {v[0]:.1f}%  PC2 {v[1]:.1f}%  PC3 {v[2]:.1f}%  "
+             f"|  {len(res['genes'])} genes"),
+            fp,
         )
     except Exception as e:
         log.error(f"pca: {e}")
-        return blank(str(e)), str(e)
+        return blank(str(e)), str(e), None
 
 
 # ── Advanced Analytics ────────────────────────────────────────────────────────
@@ -879,21 +931,26 @@ def cb_advanced(rec, lfc_t, p_t, active_tab):
 @app.callback(
     Output("gsea-bar",   "figure"),
     Output("gsea-table", "children"),
-    Input("store", "data"),
+    Output("cache-gsea", "data", allow_duplicate=True),
     Input("tabs",  "active_tab"),
+    Input("store", "data"),
+    State("data-fp",    "data"),
+    State("cache-gsea", "data"),
     prevent_initial_call=True,
 )
-def cb_gsea(rec, active_tab):
+def cb_gsea(active_tab, rec, fp, cache_fp):
     if active_tab != "tab-gsea":
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
+    if cache_fp and cache_fp == fp:
+        return dash.no_update, dash.no_update, dash.no_update
     try:
         df  = _s2df(rec)
         res = run_gsea_preranked(df)
         if res.get("error"):
-            return blank(f"GSEA: {res['error']}"), html.P(res["error"], className="text-muted small")
+            return blank(f"GSEA: {res['error']}"), html.P(res["error"], className="text-muted small"), None
         results = res["results"]
         if results.empty:
-            return blank("No GSEA results (FDR < 0.25)."), html.P("No results.", className="text-muted small")
+            return blank("No GSEA results (FDR < 0.25)."), html.P("No results.", className="text-muted small"), None
         top = results.head(15)
         sc  = "NES" if "NES" in top.columns else top.columns[0]
         tm  = "Term" if "Term" in top.columns else top.columns[min(1, len(top.columns)-1)]
@@ -921,37 +978,44 @@ def cb_gsea(rec, active_tab):
             style_header={"backgroundColor": "#1a5276", "color": "white", "fontWeight": "bold"},
             page_size=15,
         )
-        return fig, tbl
+        return fig, tbl, fp
     except Exception as e:
         log.error(f"gsea: {e}")
-        return blank(str(e)), html.P(str(e), className="text-danger small")
+        return blank(str(e)), html.P(str(e), className="text-danger small"), None
 
 
 # ── Gene Network ──────────────────────────────────────────────────────────────
 @app.callback(
     Output("network",  "figure"),
     Output("net-info", "children"),
-    Input("store", "data"),
+    Output("cache-net", "data", allow_duplicate=True),
     Input("tabs",  "active_tab"),
+    Input("store", "data"),
+    State("data-fp",   "data"),
+    State("cache-net", "data"),
     prevent_initial_call=True,
 )
-def cb_network(rec, active_tab):
+def cb_network(active_tab, rec, fp, cache_fp):
     if active_tab != "tab-net":
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
+    if cache_fp and cache_fp == fp:
+        return dash.no_update, dash.no_update, dash.no_update
     try:
         df  = _s2df(rec)
         res = run_wgcna_lite(df)
         if res.get("error"):
-            return blank(res["error"]), res["error"]
+            return blank(res["error"]), res["error"], None
         G = res["graph"]
         fig = create_network_graph(res)
-        return fig, (
-            f"WGCNA-lite  |  {G.number_of_nodes()} nodes  "
-            f"|  {res['n_edges']} edges  |  {res['n_modules']} modules"
+        return (
+            fig,
+            (f"WGCNA-lite  |  {G.number_of_nodes()} nodes  "
+             f"|  {res['n_edges']} edges  |  {res['n_modules']} modules"),
+            fp,
         )
     except Exception as e:
         log.error(f"network: {e}")
-        return blank(str(e)), str(e)
+        return blank(str(e)), str(e), None
 
 
 # ── Drug Targets tab ──────────────────────────────────────────────────────────
@@ -1009,13 +1073,18 @@ def cb_drugs(rec, lfc_t, p_t, active_tab):
     Output("bm-chart",     "figure"),
     Output("cancer-table", "children"),
     Output("bm-store",     "data"),
-    Input("store",      "data"),
+    Output("cache-bm",     "data", allow_duplicate=True),
     Input("tabs",       "active_tab"),
+    Input("store",      "data"),
+    State("data-fp",  "data"),
+    State("cache-bm", "data"),
     prevent_initial_call=True,
 )
-def cb_biomarker(rec, active_tab):
+def cb_biomarker(active_tab, rec, fp, cache_fp):
     if active_tab != "tab-bm":
-        return (dash.no_update,) * 3
+        return (dash.no_update,) * 4
+    if cache_fp and cache_fp == fp:
+        return (dash.no_update,) * 4
     try:
         df     = _s2df(rec)
         bm_df  = compute_biomarker_score(df)
@@ -1045,10 +1114,10 @@ def cb_biomarker(rec, active_tab):
                 ],
                 page_size=20,
             )
-        return fig, cancer_tbl, bm_df.to_dict("records")
+        return fig, cancer_tbl, bm_df.to_dict("records"), fp
     except Exception as e:
         log.error(f"biomarker: {e}")
-        return blank(str(e)), html.P(str(e), className="text-danger small"), []
+        return blank(str(e)), html.P(str(e), className="text-danger small"), [], None
 
 
 # ── Auto-Insights tab ─────────────────────────────────────────────────────────
