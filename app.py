@@ -1013,15 +1013,11 @@ def update_data_and_volcano(contents, n_clicks, lfc_thresh, p_thresh,
             if errors:
                 empty_fig = create_volcano_plot(pd.DataFrame(columns=['log2_fold_change', 'adjusted_p_value', 'gene_symbol']),
                                                 'log2_fold_change', 'adjusted_p_value', 'gene_symbol')
-                # FIXED: BUG-4 — explicit column-detection failure message
-                col_fail_msg = (
-                    f"Column detection failed. Found: {list(temp_df.columns)}. "
-                    "Expected one of: [log2fc/logfc/lfc] [padj/fdr/qvalue] [symbol/gene/id]"
-                )
+                err_msg = " | ".join(errors)
                 return (None, empty_fig, dash.no_update,
                         dash.no_update, dash.no_update, False, True,
                         html_summary, 'danger', True,
-                        col_fail_msg, 'danger', True)
+                        err_msg, 'danger', True)
 
             if warnings or html_summary:
                 logger.warning(f"Data validation: {len(warnings)} warnings")

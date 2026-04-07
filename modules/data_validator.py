@@ -114,16 +114,32 @@ class DataValidator:
         
         col_map = {}
         missing_required = []
-        
+
         for required, patterns in required_patterns.items():
             found = False
+            norm_patterns = [p.lower().replace(' ', '_').replace('-', '_') for p in patterns]
+
+            # Pass 1: exact match
             for col in df.columns:
                 col_lower = col.lower().replace(' ', '_').replace('-', '_')
-                if col_lower in [p.lower().replace(' ', '_').replace('-', '_') for p in patterns]:
+                if col_lower in norm_patterns:
                     col_map[required] = col
                     found = True
                     break
-            
+
+            # Pass 2: substring match — handles prefixed/suffixed names like
+            # "diffexp_log2fc_NORMAL-vs-DISEASE" or "deseq2_qvalue_group"
+            if not found:
+                for col in df.columns:
+                    col_lower = col.lower().replace('-', '_')
+                    for p in norm_patterns:
+                        if len(p) >= 4 and p in col_lower:
+                            col_map[required] = col
+                            found = True
+                            break
+                    if found:
+                        break
+
             if not found:
                 missing_required.append(required)
         
