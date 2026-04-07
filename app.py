@@ -304,7 +304,7 @@ SIDEBAR = dbc.Col([
     html.Div([
         html.Div("🧬", style={"fontSize": 36}),
         html.H5("Apex Bioinformatics", className="mb-0 text-white fw-bold"),
-        html.Small("Full-Scale Engine v3.1", className="text-white-50"),
+        html.Small("v3.2.5 (Platinum Performance)", className="text-white-50"),
     ], className="p-3 text-center",
        style={"background": "linear-gradient(135deg,#1a5276,#117a65)"}),
 
@@ -618,6 +618,9 @@ def cb_ingest(contents, fname):
                 "Check that your file has symbol / log2FC / padj columns.",
                 color="warning", dismissable=True,
             )
+        # Trim to essential columns only — keeps memory store lean for 17k+ genes
+        _KEEP = ["symbol", "log2FC", "padj", "pvalue", "baseMean"]
+        df = df[[c for c in _KEEP if c in df.columns]]
         log.info(f"Uploaded {fname}: {len(df)} genes, cols={df.columns.tolist()}")
         return df.to_dict("records"), dbc.Alert(
             f"✅ {fname} — {len(df):,} genes loaded", color="success", dismissable=True,

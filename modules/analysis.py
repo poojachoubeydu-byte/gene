@@ -300,15 +300,16 @@ def run_wgcna_lite(df: pd.DataFrame, n_clusters: int = 5, max_genes: int = 120) 
     G = nx.Graph()
     G.add_nodes_from(genes)
 
-    edges = [
-        (genes[i], genes[j], float(adj[i, j]))
-        for i in range(len(genes))
-        for j in range(i + 1, len(genes))
-        if adj[i, j] > thr
-    ]
-    edges.sort(key=lambda x: x[2], reverse=True)
-    for s, t, w in edges[:3000]:
-        G.add_edge(s, t, weight=w)
+    # Vectorised edge extraction — np.where on upper triangle, no Python loop
+    rows, cols_idx = np.where(np.triu(adj > thr, k=1))
+    weights = adj[rows, cols_idx]
+    order   = np.argsort(weights)[::-1]          # descending weight
+    rows, cols_idx, weights = rows[order], cols_idx[order], weights[order]
+    genes_arr = np.array(genes)
+    for s, t, w in zip(genes_arr[rows[:3000]],
+                        genes_arr[cols_idx[:3000]],
+                        weights[:3000]):
+        G.add_edge(str(s), str(t), weight=float(w))
 
     # ── Hub detection: top-degree node per module ──────────────────────────
     modules: dict = {}
@@ -489,13 +490,16 @@ def compute_pathway_crosstalk(enr_df: pd.DataFrame, top_n: int = 12) -> pd.DataF
         for genes in top["genes"]
     ]
 
-    n   = len(labels)
-    mat = np.zeros((n, n))
+    n      = len(labels)
+    sizes  = np.array([len(s) for s in gene_sets])
+    mat    = np.zeros((n, n))
+    # Vectorised Jaccard: precompute intersection sizes; union = |A|+|B|-|inter|
     for i in range(n):
-        for j in range(n):
-            u     = gene_sets[i] | gene_sets[j]
-            inter = gene_sets[i] & gene_sets[j]
-            mat[i, j] = len(inter) / len(u) if u else 0.0
+        inter_sizes = np.array([len(gene_sets[i] & gene_sets[j]) for j in range(n)])
+        union_sizes = sizes[i] + sizes - inter_sizes
+        with np.errstate(invalid="ignore", divide="ignore"):
+            row = np.where(union_sizes > 0, inter_sizes / union_sizes, 0.0)
+        mat[i] = row
 
     return pd.DataFrame(mat, index=labels, columns=labels)
 

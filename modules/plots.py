@@ -259,7 +259,7 @@ def create_pathway_bubble(enr: pd.DataFrame) -> go.Figure:
         db_short = top["database"].str.upper().str[:3]
         top["label"] = db_short + " · " + top["label"]
 
-    fig = go.Figure(go.Scatter(
+    fig = go.Figure(go.Scattergl(
         x=top["enrichment_score"], y=top["label"],
         mode="markers",
         marker=dict(
@@ -321,7 +321,7 @@ def create_pathway_crosstalk(crosstalk_df: pd.DataFrame) -> go.Figure:
     if crosstalk_df is None or crosstalk_df.empty:
         return blank("Insufficient enriched pathways for crosstalk analysis.")
 
-    fig = go.Figure(go.Heatmap(
+    fig = go.Figure(go.Heatmapgl(
         z=crosstalk_df.values,
         x=crosstalk_df.columns.tolist(),
         y=crosstalk_df.index.tolist(),
@@ -537,7 +537,7 @@ def create_ma_plot(df: pd.DataFrame) -> go.Figure:
                              (sig & (df["log2FC"] > 0), "#e74c3c", "Up"),
                              (sig & (df["log2FC"] < 0), "#3498db", "Down")]:
         sub = df[mask]
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=sub["_x"], y=sub["log2FC"],
             mode="markers", name=name,
             marker=dict(color=col, size=5, opacity=0.7),
@@ -629,7 +629,7 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
         sig.nsmallest(top_n // 2, "log2FC"),
     ]).drop_duplicates("symbol")
     z = np.column_stack([-np.log10(top["padj"]), top["log2FC"]])
-    fig = go.Figure(go.Heatmap(
+    fig = go.Figure(go.Heatmapgl(
         z=z.T,
         x=top["symbol"].tolist(),
         y=["-log10(p)", "Log2FC"],
@@ -716,14 +716,14 @@ def create_network_graph(network_data: dict) -> go.Figure:
     traces = []
     if edge_pos:
         ex, ey = [x for x, _ in edge_pos], [y for _, y in edge_pos]
-        traces.append(go.Scatter(x=ex, y=ey, mode="lines",
-                                 line=dict(width=0.8, color="#e74c3c"),
-                                 hoverinfo="none", showlegend=True, name="Corr +"))
+        traces.append(go.Scattergl(x=ex, y=ey, mode="lines",
+                                   line=dict(width=0.8, color="#e74c3c"),
+                                   hoverinfo="none", showlegend=True, name="Corr +"))
     if edge_neg:
         ex, ey = [x for x, _ in edge_neg], [y for _, y in edge_neg]
-        traces.append(go.Scatter(x=ex, y=ey, mode="lines",
-                                 line=dict(width=0.8, color="#3498db"),
-                                 hoverinfo="none", showlegend=True, name="Corr −"))
+        traces.append(go.Scattergl(x=ex, y=ey, mode="lines",
+                                   line=dict(width=0.8, color="#3498db"),
+                                   hoverinfo="none", showlegend=True, name="Corr −"))
 
     node_x = [pos[n][0] for n in G.nodes()]
     node_y = [pos[n][1] for n in G.nodes()]
