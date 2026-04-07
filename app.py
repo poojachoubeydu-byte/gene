@@ -973,9 +973,9 @@ app.layout = dbc.Container([
     # by load-demo-btn, lfc-thresh-slider, padj-thresh-dd — kept hidden so
     # any callback that still reads them doesn't raise a missing-component error.
     html.Div([
-        dbc.Button(id='demo-btn', style={'display': 'none'}),
-        dcc.Slider(id='lfc-slider', value=1.0, style={'display': 'none'}),
-        dcc.Slider(id='pval-slider', value=2, style={'display': 'none'}),
+        dbc.Button(id='demo-btn'),
+        html.Div(dcc.Slider(id='lfc-slider', min=0.5, max=3.0, step=0.5, value=1.0)),
+        html.Div(dcc.Slider(id='pval-slider', min=1, max=5, step=1, value=2)),
     ], style={'display': 'none'}),
 
     # ── ENHANCED STORES ────────────────────────────────
