@@ -65,6 +65,16 @@ from data.gene_annotations import get_drug_targets, get_cancer_gene_info
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global symbol cleaner (mirrors modules/analysis._clean_sym)
+# Strips whitespace, surrounding quotes, converts to UPPER.
+# Applied at every boundary: upload, lasso, DB lookups.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _clean_sym(sym) -> str:
+    return str(sym).strip().strip('"').strip("'").upper()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # App initialisation
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,7 +176,8 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
                 break
 
     # Always cast symbol to string so .str accessor never fails downstream
-    df["symbol"] = df["symbol"].astype(str).str.strip()
+    # _clean_sym: strip whitespace + quotes + uppercase — ensures KEGG/GSEA/Drug DB matches
+    df["symbol"] = df["symbol"].map(_clean_sym)
 
     df["log2FC"] = pd.to_numeric(df["log2FC"], errors="coerce")
     # DESeq2 / edgeR output regularly has NA padj for low-count genes (independent
@@ -237,31 +248,36 @@ def _run_enrichment(
     """
     if not sig_genes:
         return pd.DataFrame()
-    # Normalise symbols defensively before any lookup
-    sig_genes = [g.strip().upper() for g in sig_genes if g and str(g).strip()]
+    # Normalise symbols with global cleaner before any DB lookup
+    sig_genes = [_clean_sym(g) for g in sig_genes if g and str(g).strip()]
     if not sig_genes:
         return pd.DataFrame()
     try:
         analyzer = _get_analyzer(db_choice)
         lfc_map  = gene_lfc_map or {}
         nlp_map  = gene_nlp_map or {}
-        if db_choice == "all":
-            return analyzer.run_multi_enrichment(
-                sig_genes,
-                padj_threshold=0.05,
-                background=background,
-                strict=strict,
-                gene_lfc_map=lfc_map,
-                gene_nlp_map=nlp_map,
-            )
-        return analyzer.run_enrichment(
-            sig_genes,
+        _kwargs  = dict(
             padj_threshold=0.05,
             background=background,
-            strict=strict,
             gene_lfc_map=lfc_map,
             gene_nlp_map=nlp_map,
         )
+        if db_choice == "all":
+            result = analyzer.run_multi_enrichment(sig_genes, strict=strict, **_kwargs)
+            # Auto-retry: never leave user with blank — silently relax if strict gave nothing
+            if result.empty and strict:
+                log.info("Enrichment: strict mode returned 0 rows — auto-retrying with relaxed threshold")
+                result = analyzer.run_multi_enrichment(sig_genes, strict=False, **_kwargs)
+                if not result.empty:
+                    result["_mode"] = "relaxed"
+        else:
+            result = analyzer.run_enrichment(sig_genes, strict=strict, **_kwargs)
+            if result.empty and strict:
+                log.info("Enrichment: strict mode returned 0 rows — auto-retrying with relaxed threshold")
+                result = analyzer.run_enrichment(sig_genes, strict=False, **_kwargs)
+                if not result.empty:
+                    result["_mode"] = "relaxed"
+        return result
     except Exception as e:
         log.warning(f"Enrichment ({db_choice}): {e}")
         return pd.DataFrame()
@@ -317,7 +333,7 @@ SIDEBAR = dbc.Col([
     html.Div([
         html.Div("🧬", style={"fontSize": 36}),
         html.H5("Apex Bioinformatics", className="mb-0 text-white fw-bold"),
-        html.Small("v3.2.5 (Platinum Performance)", className="text-white-50"),
+        html.Small("v3.3.0 (Absolute Integration)", className="text-white-50"),
     ], className="p-3 text-center",
        style={"background": "linear-gradient(135deg,#1a5276,#117a65)"}),
 
@@ -1119,33 +1135,55 @@ def cb_drugs(rec, lfc_t, p_t, active_tab):
     try:
         df = _s2df(rec)
         mask = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
-        sig_genes = df.loc[mask, "symbol"].str.upper().tolist()
+        sig_genes = df.loc[mask, "symbol"].map(_clean_sym).tolist()
 
         drug_df = get_drug_targets(sig_genes)
+
+        # Fallback: if current thresholds give no drug hits, use top-100 up-regulated
+        fallback_used = False
+        if drug_df.empty and not df.empty:
+            top100 = (
+                df[df["log2FC"] > 0]
+                .nlargest(100, "log2FC")["symbol"]
+                .map(_clean_sym).tolist()
+            )
+            drug_df = get_drug_targets(top100)
+            fallback_used = drug_df is not None and not drug_df.empty
 
         scatter = create_drug_target_chart(drug_df, df)
         donut   = create_drug_type_donut(drug_df)
 
         if drug_df.empty:
-            tbl = html.P("No FDA-approved drug targets among significant genes.",
-                         className="text-muted small ps-1 mt-2")
+            tbl = html.P(
+                "No FDA-approved drug targets found. Try relaxing the LFC/p-value thresholds.",
+                className="text-muted small ps-1 mt-2",
+            )
         else:
             fda = drug_df[drug_df["fda"] == True].copy() if "fda" in drug_df.columns else drug_df
             cols = [c for c in ["gene", "drug", "type", "indication", "fda"] if c in fda.columns]
-            tbl = dash_table.DataTable(
-                data=fda[cols].to_dict("records"),
-                columns=[{"name": c.title(), "id": c} for c in cols],
-                style_table={"maxHeight": "340px", "overflowY": "auto"},
-                style_cell={"fontSize": 11, "padding": "3px 8px"},
-                style_header={"backgroundColor": "#1a5276", "color": "white",
-                              "fontWeight": "bold", "fontSize": 11},
-                style_data_conditional=[
-                    {"if": {"row_index": "odd"}, "backgroundColor": "#f4f6f7"},
-                    {"if": {"filter_query": "{fda} eq True"},
-                     "backgroundColor": "#d5f5e3"},
-                ],
-                page_size=15,
-            )
+            fallback_alert = []
+            if fallback_used:
+                fallback_alert = [dbc.Alert(
+                    "ℹ️ No drug targets in your filtered selection — showing Top 100 up-regulated genes instead.",
+                    color="info", className="py-1 px-2 mb-2 small",
+                )]
+            tbl = html.Div([
+                *fallback_alert,
+                dash_table.DataTable(
+                    data=fda[cols].to_dict("records"),
+                    columns=[{"name": c.title(), "id": c} for c in cols],
+                    style_table={"maxHeight": "340px", "overflowY": "auto"},
+                    style_cell={"fontSize": 11, "padding": "3px 8px"},
+                    style_header={"backgroundColor": "#1a5276", "color": "white",
+                                  "fontWeight": "bold", "fontSize": 11},
+                    style_data_conditional=[
+                        {"if": {"row_index": "odd"}, "backgroundColor": "#f4f6f7"},
+                        {"if": {"filter_query": "{fda} eq True"},
+                         "backgroundColor": "#d5f5e3"},
+                    ],
+                    page_size=15,
+                ),
+            ])
         return scatter, donut, tbl
     except Exception as e:
         log.error(f"drugs: {e}")

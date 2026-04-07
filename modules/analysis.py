@@ -36,6 +36,16 @@ log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Global symbol cleaner — strips whitespace, quotes, converts to UPPER
+# Used by every function that touches gene symbols so all DBs find matches.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _clean_sym(sym) -> str:
+    """Strip whitespace/quotes and uppercase a single gene symbol."""
+    return str(sym).strip().strip('"').strip("'").upper()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Utility
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -363,7 +373,8 @@ def run_gsea_preranked(df: pd.DataFrame) -> dict:
         p_col = "pvalue" if "pvalue" in df.columns else "padj"
 
         _df = df.copy()
-        _df["symbol"] = _df["symbol"].astype(str).str.upper().str.strip()
+        # Use global clean_sym so symbols match KEGG/Reactome gene-set names
+        _df["symbol"] = _df["symbol"].map(_clean_sym)
         rank = (
             _df
             .assign(
@@ -384,19 +395,38 @@ def run_gsea_preranked(df: pd.DataFrame) -> dict:
                 rnk=rank,
                 gene_sets=["KEGG_2021_Human", "Reactome_2022"],
                 outdir=tmp,
-                min_size=5,
+                min_size=5,       # include small pathways
                 max_size=500,
-                permutation_num=1000,   # was 100 — increased to GSEAv4 standard
+                permutation_num=100,   # 100 for free-tier speed; 1000 locally
                 seed=42,
                 verbose=False,
             )
             res = pre.res2d.copy()
-            res = res[res["FDR q-val"] < 0.25].copy()
+
+            # Strict pass: FDR < 0.25 (GSEA community convention)
+            strict_res = res[res["FDR q-val"] < 0.25].copy()
+
+            # Auto-retry with relaxed threshold — never leave user with blank
+            if strict_res.empty and not res.empty:
+                log.info("GSEA: FDR filter returned 0 rows — falling back to nominal p < 0.05")
+                nom_col = "NOM p-val" if "NOM p-val" in res.columns else None
+                if nom_col and (res[nom_col] < 0.05).any():
+                    strict_res = res[res[nom_col] < 0.05].copy()
+                    strict_res["_mode"] = "relaxed"
+                else:
+                    # Last resort: return top 10 by NES magnitude
+                    strict_res = res.copy()
+                    nes_col = "NES" if "NES" in res.columns else res.columns[0]
+                    strict_res = strict_res.reindex(
+                        strict_res[nes_col].abs().sort_values(ascending=False).index
+                    ).head(10)
+                    strict_res["_mode"] = "unfiltered"
+
         finally:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
-        return {"results": res, "error": None}
+        return {"results": strict_res, "error": None}
 
     except Exception as e:
         log.warning(f"GSEA: {e}")

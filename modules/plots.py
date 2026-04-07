@@ -321,12 +321,13 @@ def create_pathway_crosstalk(crosstalk_df: pd.DataFrame) -> go.Figure:
     if crosstalk_df is None or crosstalk_df.empty:
         return blank("Insufficient enriched pathways for crosstalk analysis.")
 
-    fig = go.Figure(go.Heatmapgl(
+    fig = go.Figure(go.Heatmap(
         z=crosstalk_df.values,
         x=crosstalk_df.columns.tolist(),
         y=crosstalk_df.index.tolist(),
         colorscale="YlOrRd",
         zmin=0, zmax=1,
+        zsmooth="fast",
         hovertemplate=(
             "<b>%{y}</b><br>vs <b>%{x}</b><br>"
             "Jaccard similarity: %{z:.2f}<extra></extra>"
@@ -629,11 +630,12 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
         sig.nsmallest(top_n // 2, "log2FC"),
     ]).drop_duplicates("symbol")
     z = np.column_stack([-np.log10(top["padj"]), top["log2FC"]])
-    fig = go.Figure(go.Heatmapgl(
+    fig = go.Figure(go.Heatmap(
         z=z.T,
         x=top["symbol"].tolist(),
         y=["-log10(p)", "Log2FC"],
         colorscale="RdBu", reversescale=True, zmid=0,
+        zsmooth="fast",
         hovertemplate="Gene: %{x}<br>Metric: %{y}<br>Value: %{z:.3f}<extra></extra>",
         colorbar=dict(title="Value", thickness=12),
     ))
