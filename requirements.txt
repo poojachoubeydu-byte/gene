@@ -13,3 +13,5 @@ diskcache
 scikit-learn
 openpyxl
 kaleido
+
+# Force Rebuild Trigger: 04/07/2026 14:35:50
