@@ -163,47 +163,33 @@ def compute_activation_zscore(
     lfc_map = ref.set_index("_sym")["log2FC"].to_dict()
     nlp_map = ref.set_index("_sym")["_nlp"].to_dict()
 
-    z_scores, directions, ews_list = [], [], []
-
-    for _, row in enr_df.iterrows():
-        gene_str = row.get("genes", "")
+    def _score_pathway(gene_str: str) -> tuple:
         genes    = [g.strip().upper() for g in str(gene_str).split(";") if g.strip()]
-
-        lfc_vals = np.array([lfc_map[g] for g in genes if g in lfc_map])
-
+        lfc_vals = np.fromiter(
+            (lfc_map[g] for g in genes if g in lfc_map), dtype=float
+        )
         if len(lfc_vals) == 0:
-            z_scores.append(np.nan)
-            directions.append("Inconclusive")
-            ews_list.append(0.0)
-            continue
+            return np.nan, "Inconclusive", 0.0
 
         n_up  = int((lfc_vals > 0).sum())
         n_dn  = int((lfc_vals < 0).sum())
         n_tot = n_up + n_dn
-
-        # Activation z-score
-        z = (n_up - n_dn) / np.sqrt(n_tot) if n_tot > 0 else 0.0
-
-        # Effect-weighted score: Σ(|LFC| × −log10p) for overlap genes
-        ews = sum(
-            abs(lfc_map.get(g, 0.0)) * nlp_map.get(g, 0.0)
-            for g in genes if g in lfc_map
+        z     = (n_up - n_dn) / np.sqrt(n_tot) if n_tot > 0 else 0.0
+        ews   = float(np.sum(np.abs(lfc_vals) * np.fromiter(
+            (nlp_map.get(g, 0.0) for g in genes if g in lfc_map), dtype=float
+        )))
+        direction = (
+            "Activated" if z >= 2.0 else
+            "Inhibited" if z <= -2.0 else
+            "Inconclusive"
         )
+        return round(float(z), 3), direction, round(ews, 2)
 
-        z_scores.append(round(float(z), 3))
-        ews_list.append(round(float(ews), 2))
-
-        if z >= 2.0:
-            directions.append("Activated")
-        elif z <= -2.0:
-            directions.append("Inhibited")
-        else:
-            directions.append("Inconclusive")
-
+    results = enr_df["genes"].map(_score_pathway)
     out = enr_df.copy()
-    out["activation_zscore"]     = z_scores
-    out["direction"]             = directions
-    out["effect_weighted_score"] = ews_list
+    out["activation_zscore"]     = results.map(lambda t: t[0])
+    out["direction"]             = results.map(lambda t: t[1])
+    out["effect_weighted_score"] = results.map(lambda t: t[2])
     return out
 
 
@@ -436,40 +422,45 @@ def compute_biomarker_score(df: pd.DataFrame) -> pd.DataFrame:
 
     df = compute_meta_score(df).copy()
 
-    bonus       = pd.Series(0.0, index=df.index)
-    drug_flag   = []
-    cancer_role = []
-    bm_type     = []
+    # Vectorised lookup — O(n) dict access, no Python-level row loop
+    syms = df["symbol"].str.strip().str.upper()
 
-    for _, row in df.iterrows():
-        sym = str(row["symbol"]).strip().upper()
+    def _drug_flag(sym: str) -> str:
+        drugs = DRUG_GENE_INTERACTIONS.get(sym, [])
+        fda   = [d for d in drugs if d.get("fda")]
+        return f"{len(fda)} drug(s)" if fda else ""
 
-        drugs     = DRUG_GENE_INTERACTIONS.get(sym, [])
-        fda_drugs = [d for d in drugs if d.get("fda")]
-        if fda_drugs:
-            bonus[_] += 15
-            drug_flag.append(f"{len(fda_drugs)} drug(s)")
-        else:
-            drug_flag.append("")
+    def _drug_bonus(sym: str) -> float:
+        drugs = DRUG_GENE_INTERACTIONS.get(sym, [])
+        return 15.0 if any(d.get("fda") for d in drugs) else 0.0
 
+    def _cancer_role(sym: str) -> str:
         cgc = CANCER_GENE_CENSUS.get(sym)
-        if cgc:
-            bonus[_] += 10 if cgc["tier"] == 1 else 5
-            cancer_role.append(cgc["role"])
-        else:
-            cancer_role.append("")
+        return cgc["role"] if cgc else ""
 
+    def _cancer_bonus(sym: str) -> float:
+        cgc = CANCER_GENE_CENSUS.get(sym)
+        if not cgc:
+            return 0.0
+        return 10.0 if cgc["tier"] == 1 else 5.0
+
+    def _bm_type(sym: str) -> str:
         bm = ESTABLISHED_BIOMARKERS.get(sym)
-        if bm:
-            bonus[_] += 5
-            bm_type.append(bm["type"])
-        else:
-            bm_type.append("")
+        return bm["type"] if bm else ""
+
+    def _bm_bonus(sym: str) -> float:
+        return 5.0 if ESTABLISHED_BIOMARKERS.get(sym) else 0.0
+
+    bonus = (
+        syms.map(_drug_bonus)
+        + syms.map(_cancer_bonus)
+        + syms.map(_bm_bonus)
+    )
 
     df["biomarker_score"] = np.clip(df["meta_score"] + bonus, 0, 100).round(1)
-    df["is_drug_target"]  = drug_flag
-    df["cancer_role"]     = cancer_role
-    df["biomarker_type"]  = bm_type
+    df["is_drug_target"]  = syms.map(_drug_flag).values
+    df["cancer_role"]     = syms.map(_cancer_role).values
+    df["biomarker_type"]  = syms.map(_bm_type).values
     return df
 
 

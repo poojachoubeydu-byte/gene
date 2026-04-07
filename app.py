@@ -255,7 +255,7 @@ SIDEBAR = dbc.Col([
     html.Div([
         html.Div("🧬", style={"fontSize": 36}),
         html.H5("Apex Bioinformatics", className="mb-0 text-white fw-bold"),
-        html.Small("Multi-Omics Platform v2.0", className="text-white-50"),
+        html.Small("Full-Scale Engine v3.1", className="text-white-50"),
     ], className="p-3 text-center",
        style={"background": "linear-gradient(135deg,#1a5276,#117a65)"}),
 
@@ -590,7 +590,7 @@ def cb_banner(rec, lfc_t, p_t):
         card("Total Genes",      n,      "#2c3e50"),
         card("⬆ Up-regulated",   up,     "#c0392b"),
         card("⬇ Down-regulated", dn,     "#2980b9"),
-        card("✔ Significant",    sig,    "#27ae60"),
+        card("Significant Genes", sig,    "#27ae60"),
         card("💊 Drug Targets",  n_drug, "#8e44ad"),
         html.Div(f"|Log2FC| ≥ {lfc_t}  p ≤ {p_t}",
                  className="align-self-center small text-muted ms-2"),
