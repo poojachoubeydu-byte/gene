@@ -118,17 +118,24 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
     rn = {}
     for c in df.columns:
         cl = c.lower().strip()
-        if   cl in ("gene_name","gene","genename","hgnc_symbol","symbol"): rn[c] = "symbol"
-        elif cl in ("log2foldchange","log2fc","lfc","foldchange"):          rn[c] = "log2FC"
-        elif cl in ("padj","adj.p.val","adj_p_value","fdr","p_adj"):       rn[c] = "padj"
-        elif cl in ("basemean","base_mean","mean_expr","avgexpr"):         rn[c] = "baseMean"
+        if   cl in ("gene_name","gene","genename","hgnc_symbol","symbol","id","gene_id"): rn[c] = "symbol"
+        elif cl in ("log2foldchange","log2fc","lfc","foldchange","log2_fold_change"):     rn[c] = "log2FC"
+        elif cl in ("padj","adj.p.val","adj_p_value","fdr","p_adj","p.adj","bh",
+                    "p_value_adj","adjusted_pvalue","adj_pval"):                          rn[c] = "padj"
+        elif cl in ("pvalue","p.value","p_value","pval","nominal_p"):                    rn[c] = "pvalue"
+        elif cl in ("basemean","base_mean","mean_expr","avgexpr","averageexpression",
+                    "mean_count","basemean"):                                             rn[c] = "baseMean"
     df = df.rename(columns=rn)
     if not {"symbol", "log2FC", "padj"}.issubset(df.columns):
         cols = df.columns.tolist()
         df   = df.rename(columns={cols[0]: "symbol", cols[1]: "log2FC", cols[2]: "padj"})
     df["log2FC"] = pd.to_numeric(df["log2FC"], errors="coerce")
-    df["padj"]   = pd.to_numeric(df["padj"],   errors="coerce").clip(lower=1e-300)
-    return df.dropna(subset=["log2FC", "padj"]).reset_index(drop=True)
+    # DESeq2 / edgeR output regularly has NA padj for low-count genes (independent
+    # filtering). Coerce those to 1.0 (non-significant) so NO genes are dropped.
+    padj_raw = pd.to_numeric(df["padj"], errors="coerce")
+    df["padj"] = padj_raw.fillna(1.0).clip(lower=1e-300, upper=1.0)
+    # Only drop rows where log2FC is truly missing (all-zero-count genes, uninformative)
+    return df.dropna(subset=["log2FC"]).reset_index(drop=True)
 
 
 def _load_demo() -> pd.DataFrame:
@@ -159,12 +166,15 @@ def _load_demo() -> pd.DataFrame:
 
 
 def _s2df(data) -> pd.DataFrame:
+    """Reconstruct DataFrame from dcc.Store records. Never silently falls back
+    to demo data — returns an empty (but schema-valid) DataFrame so callers can
+    detect the no-data state without being misled by 50-gene demo values."""
     if data:
         try:
             return pd.DataFrame(data)
         except Exception:
             pass
-    return _load_demo()
+    return pd.DataFrame(columns=["symbol", "log2FC", "padj"])
 
 
 def _run_enrichment(
@@ -546,16 +556,26 @@ app.layout = dbc.Container(
 def cb_ingest(contents, fname):
     if contents is None:
         df = _load_demo()
-        return df.to_dict("records"), f"📊 Demo: 30-gene panel ({len(df)} genes)"
+        return df.to_dict("records"), f"📊 Demo dataset — {len(df)} genes loaded"
     try:
         _, b64 = contents.split(",", 1)
-        df = _normalise(pd.read_csv(io.StringIO(
-            base64.b64decode(b64).decode("utf-8", errors="replace")
-        )))
-        return df.to_dict("records"), f"✅ {fname} — {len(df)} genes loaded"
+        raw = base64.b64decode(b64).decode("utf-8", errors="replace")
+        df  = _normalise(pd.read_csv(io.StringIO(raw)))
+        if df.empty:
+            return dash.no_update, dbc.Alert(
+                f"⚠️ {fname} parsed but 0 genes remained after normalisation. "
+                "Check that your file has symbol / log2FC / padj columns.",
+                color="warning", dismissable=True,
+            )
+        log.info(f"Uploaded {fname}: {len(df)} genes, cols={df.columns.tolist()}")
+        return df.to_dict("records"), dbc.Alert(
+            f"✅ {fname} — {len(df):,} genes loaded", color="success", dismissable=True,
+        )
     except Exception as e:
-        df = _load_demo()
-        return df.to_dict("records"), f"⚠️ Parse error ({e}) — demo loaded"
+        log.error(f"cb_ingest error on {fname}: {e}")
+        return dash.no_update, dbc.Alert(
+            f"❌ Could not parse {fname}: {e}", color="danger", dismissable=True,
+        )
 
 
 # ── Summary banner ────────────────────────────────────────────────────────────
@@ -566,11 +586,14 @@ def cb_ingest(contents, fname):
     Input("p-thresh", "value"),
 )
 def cb_banner(rec, lfc_t, p_t):
-    df  = _s2df(rec)
-    n   = len(df)
+    df = _s2df(rec)
+    if df.empty:
+        return [html.Span("Upload a DGE CSV to begin analysis",
+                          className="text-muted small align-self-center")]
+    n   = len(df)   # Total Genes  = full dataset regardless of thresholds
     up  = int(((df["log2FC"] >  lfc_t) & (df["padj"] < p_t)).sum())
     dn  = int(((df["log2FC"] < -lfc_t) & (df["padj"] < p_t)).sum())
-    sig = up + dn
+    sig = up + dn   # Significant Genes = passing the UI sliders only
 
     # Count drug targets among significant genes
     sig_genes = df.loc[
