@@ -485,8 +485,8 @@ def compute_pathway_crosstalk(enr_df: pd.DataFrame, top_n: int = 12) -> pd.DataF
 
     labels    = top["pathway"].str[:40].tolist()
     gene_sets = [
-        set(str(g).upper() for g in row["genes"].split(";") if g.strip())
-        for _, row in top.iterrows()
+        set(str(g).upper() for g in str(genes).split(";") if g.strip())
+        for genes in top["genes"]
     ]
 
     n   = len(labels)

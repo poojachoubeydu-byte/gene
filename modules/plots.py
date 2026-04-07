@@ -60,6 +60,16 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
     }
 
     has_base = "baseMean" in df.columns
+    # ── Decimation: keep all significant + top non-sig by p-value (max 5000 total) ──
+    PLOT_CAP = 5000
+    if len(df) > PLOT_CAP:
+        sig_mask = df["_cat"] != "Non-significant"
+        sig_df   = df[sig_mask]
+        ns_df    = df[~sig_mask]
+        ns_slots = max(0, PLOT_CAP - len(sig_df))
+        ns_df    = ns_df.nsmallest(ns_slots, padj_col) if ns_slots > 0 else ns_df.iloc[0:0]
+        df = pd.concat([sig_df, ns_df], ignore_index=True)
+
     fig = go.Figure()
 
     for cat, color in color_map.items():
@@ -74,7 +84,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
         if has_base:
             ht += "BaseMean: %{customdata[1]:.1f}"
         ht += "<extra></extra>"
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(          # WebGL for GPU-accelerated rendering
             x=sub[logfc_col], y=sub["_nlp"],
             mode="markers", name=cat,
             marker=dict(color=color, size=6, opacity=0.75),
@@ -99,7 +109,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 lambda g: CANCER_GENE_CENSUS.get(g, {}).get("cancer_types", ["?"])[0]
             ).values,
         ])
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=onco_up[logfc_col], y=onco_up["_nlp"],
             mode="markers+text",
             name="Oncogene ↑",
@@ -127,7 +137,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 lambda g: CANCER_GENE_CENSUS.get(g, {}).get("cancer_types", ["?"])[0]
             ).values,
         ])
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=tsg_dn[logfc_col], y=tsg_dn["_nlp"],
             mode="markers+text",
             name="TSG ↓",
@@ -155,7 +165,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
             drug_sig[gene_col].values,
             np.zeros(len(drug_sig)),
         ])
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=drug_sig[logfc_col], y=drug_sig["_nlp"],
             mode="markers",
             name="Drug target",
@@ -177,10 +187,10 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
             set(onco_up[gene_col].str.upper().tolist()) | set(tsg_dn[gene_col].str.upper().tolist())
         )
     ].nlargest(8, "_nlp")
-    for _, row in sig_rest.iterrows():
+    for rec in sig_rest[["_nlp", logfc_col, gene_col]].to_dict("records"):
         fig.add_annotation(
-            x=row[logfc_col], y=row["_nlp"],
-            text=str(row[gene_col]),
+            x=rec[logfc_col], y=rec["_nlp"],
+            text=str(rec[gene_col]),
             showarrow=False, font=dict(size=9), yshift=9,
         )
 

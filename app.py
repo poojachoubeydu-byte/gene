@@ -290,8 +290,8 @@ def _enr_table(enr: pd.DataFrame) -> html.Div:
         tooltip_delay=0,
         tooltip_duration=None,
         tooltip_data=[
-            {c: {"value": str(row[c]), "type": "markdown"} for c in cols}
-            for _, row in d.iterrows()
+            {c: {"value": str(rec[c]), "type": "markdown"} for c in cols}
+            for rec in d.to_dict("records")
         ],
     )
 
@@ -373,9 +373,9 @@ SIDEBAR = dbc.Col([
 # ─────────────────────────────────────────────────────────────────────────────
 
 MAIN = dbc.Col([
-    dcc.Store(id="store"),       # per-session DEG data
-    dcc.Store(id="enr-store"),   # per-session enrichment results
-    dcc.Store(id="bm-store"),    # per-session biomarker scores
+    dcc.Store(id="store",     storage_type="memory"),  # per-session DEG data
+    dcc.Store(id="enr-store", storage_type="memory"),  # per-session enrichment results
+    dcc.Store(id="bm-store",  storage_type="memory"),  # per-session biomarker scores
 
     # Summary banner
     html.Div(id="banner",
