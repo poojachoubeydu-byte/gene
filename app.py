@@ -229,9 +229,9 @@ app.layout = dbc.Container([
                    style={'color':'rgba(255,255,255,0.82)',
                           'marginBottom':0,'fontSize':'11px'}),
             html.Div([
-                html.Span("v3.0.0", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'}),
+                html.Span("v3.2", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'}),
                 html.Span(" • ", style={'margin':'0 8px','color':'rgba(255,255,255,0.4)'}),
-                html.Span("Real-time statistical validation", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'})
+                html.Span("GSEA Curves • Top Hits • Real-time validation", style={'fontSize':'10px','color':'rgba(255,255,255,0.6)'})
             ], style={'marginTop':'4px'})
         ], style={
             'background':'linear-gradient(135deg,#1a237e,#1565c0,#0277bd)',
@@ -274,7 +274,7 @@ app.layout = dbc.Container([
         )
     ], width=12)]),
 
-    # ── ENHANCED CONTROLS ROW ───────────────────────────
+    # ── ENHANCED CONTROLS ROW (hidden — controls moved to sidebar) ─────────────
     dbc.Row([dbc.Col([
         dbc.Card([dbc.CardBody([
             html.Div([
@@ -415,14 +415,10 @@ app.layout = dbc.Container([
                 ], style={'flexShrink': '1', 'minWidth': '120px'}),
 
             ], style={
-                'display': 'flex',
-                'gap': '16px',
-                'alignItems': 'flex-end',
-                'flexWrap': 'wrap',
-                'width': '100%'
+                'display': 'none'
             })
-        ])], className="shadow-sm mb-3")
-    ], width=12)]),
+        ])], style={'display': 'none'})
+    ], width=12, style={'display': 'none'})]),
 
     # ── ONBOARDING & HELP ───────────────────────────────
     dbc.Row([dbc.Col([
@@ -507,54 +503,160 @@ app.layout = dbc.Container([
     # ── PROFESSIONAL COCKPIT: Sidebar (col-3) + Main Content (col-9) ─────────
     dbc.Row([
 
-        # ── LEFT SIDEBAR ─────────────────────────────────────────────────────
+        # ── LEFT SIDEBAR (unified control panel) ────────────────────────────────
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader(
                     html.Div([
-                        html.I(className="fas fa-sliders-h", style={'marginRight': '8px'}),
+                        html.I(className="fas fa-dna", style={'marginRight': '8px'}),
                         html.Span("Analysis Controls", style={'fontWeight': '700', 'fontSize': '14px'})
                     ], style={'color': 'white'}),
                     style={'background': 'linear-gradient(135deg,#1a237e,#1565c0)', 'padding': '10px 14px'}
                 ),
                 dbc.CardBody([
-                    # FEATURE-A: Demo button
+
+                    # ── Upload ────────────────────────────────
+                    html.Label([
+                        html.I(className="fas fa-upload", style={'marginRight': '5px'}),
+                        "Upload DEG CSV"
+                    ], style={'fontWeight': '600', 'fontSize': '12px',
+                               'marginBottom': '4px', 'display': 'block'}),
+                    dcc.Upload(
+                        id='main-upload-comp',
+                        children=html.Div([
+                            html.I(className="fas fa-cloud-upload-alt",
+                                   style={'fontSize': '20px', 'color': '#6c757d',
+                                          'display': 'block', 'marginBottom': '4px'}),
+                            html.Span('Drop or ', style={'fontSize': '11px'}),
+                            html.A('Select File',
+                                   style={'color': '#007bff', 'fontSize': '11px',
+                                          'textDecoration': 'underline'})
+                        ]),
+                        style={
+                            'width': '100%', 'height': '64px', 'lineHeight': '64px',
+                            'borderWidth': '2px', 'borderStyle': 'dashed',
+                            'borderRadius': '8px', 'textAlign': 'center',
+                            'borderColor': '#adb5bd', 'fontSize': '11px',
+                            'cursor': 'pointer', 'backgroundColor': '#f8f9fa',
+                            'transition': 'all 0.2s ease'
+                        },
+                        max_size=MAX_FILE_SIZE,
+                        multiple=False
+                    ),
+                    html.Small("Max 10MB • CSV format",
+                               style={'color': '#6c757d', 'fontSize': '10px'}),
+                    dbc.Alert(id='upload-alert', is_open=False, dismissable=True,
+                              className="mt-1 mb-0",
+                              style={'fontSize': '11px', 'padding': '4px 8px'}),
+
+                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
+
+                    # ── Quick Start ────────────────────────────
                     dbc.Button([
-                        html.I(className="fas fa-flask", style={'marginRight': '6px'}),
+                        html.I(className="fas fa-play", style={'marginRight': '6px'}),
                         "Load Demo Data"
-                    ], id='demo-btn', color="primary", size="sm", className="w-100 mb-3"),
+                    ], id='load-demo-btn', color="success", size="sm",
+                       className="w-100 mb-1"),
+                    dbc.Button([
+                        html.I(className="fas fa-layer-group", style={'marginRight': '6px'}),
+                        "Batch Mode"
+                    ], id='toggle-batch-mode-btn', color="outline-secondary",
+                       size="sm", className="w-100"),
 
-                    html.Hr(style={'margin': '8px 0', 'borderColor': '#e9ecef'}),
+                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
 
-                    # FEATURE-C: Log2FC slider
-                    html.Label("🔬 Log2FC Cutoff",
-                               style={'fontWeight': '600', 'fontSize': '12px',
-                                      'marginBottom': '4px', 'display': 'block'}),
-                    dcc.Slider(id='lfc-slider', min=0.5, max=3.0, step=0.5,
+                    # ── Thresholds ────────────────────────────
+                    html.Label([
+                        "🔬 Log2FC Threshold ",
+                        html.I(className="fas fa-info-circle help-tooltip",
+                               title="Minimum absolute fold change for significance")
+                    ], style={'fontWeight': '600', 'fontSize': '12px',
+                               'marginBottom': '4px', 'display': 'block'}),
+                    dcc.Slider(id='lfc-thresh-slider', min=0.0, max=3.0, step=0.5,
                                value=1.0,
-                               marks={0.5: '0.5', 1: '1', 2: '2', 3: '3'},
+                               marks={0: '0', 0.5: '0.5', 1: '1',
+                                      1.5: '1.5', 2: '2', 3: '3'},
                                tooltip={'placement': 'bottom', 'always_visible': True}),
 
-                    html.Div(style={'marginTop': '24px'}),
+                    html.Div(style={'marginTop': '22px'}),
 
-                    # FEATURE-C: P-value slider
-                    html.Label("📊 P-value Cutoff",
+                    html.Label([
+                        "📊 Significance (padj) ",
+                        html.I(className="fas fa-info-circle help-tooltip",
+                               title="Adjusted p-value threshold (BH correction)")
+                    ], htmlFor='padj-thresh-dd',
+                       style={'fontWeight': '600', 'fontSize': '12px',
+                               'marginBottom': '4px', 'display': 'block'}),
+                    dcc.Dropdown(id='padj-thresh-dd',
+                                 options=[
+                                     {'label': '0.001 (Stringent)', 'value': 0.001},
+                                     {'label': '0.01 (Moderate)',   'value': 0.01},
+                                     {'label': '0.05 (Standard)',   'value': 0.05},
+                                     {'label': '0.1 (Relaxed)',     'value': 0.1}
+                                 ],
+                                 value=0.05, clearable=False,
+                                 style={'fontSize': '12px'}),
+
+                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
+
+                    # ── Analysis Options ──────────────────────
+                    html.Label("Analysis Options",
                                style={'fontWeight': '600', 'fontSize': '12px',
                                       'marginBottom': '4px', 'display': 'block'}),
-                    dcc.Slider(id='pval-slider', min=1, max=5, step=1, value=2,
-                               marks={1: '0.1', 2: '0.05', 3: '0.01',
-                                      4: '0.001', 5: '0.0001'},
-                               tooltip={'placement': 'bottom', 'always_visible': True}),
+                    dbc.Checklist(
+                        id='analysis-options',
+                        options=[
+                            {"label": "Show gene labels",       "value": "show_labels"},
+                            {"label": "Auto-scale plots",       "value": "auto_scale"},
+                            {"label": "Statistical validation", "value": "stat_validation"}
+                        ],
+                        value=["show_labels", "stat_validation"],
+                        style={'fontSize': '11px'}
+                    ),
 
-                    html.Hr(style={'margin': '20px 0 10px 0', 'borderColor': '#e9ecef'}),
+                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
+
+                    # ── Actions ───────────────────────────────
+                    html.Label("Actions",
+                               style={'fontWeight': '600', 'fontSize': '12px',
+                                      'marginBottom': '6px', 'display': 'block'}),
+                    dbc.Button([
+                        html.I(className="fas fa-redo", style={'marginRight': '4px'}),
+                        "Reset"
+                    ], id='reset-btn', color="outline-secondary",
+                       size="sm", className="w-100 mb-1"),
+                    dbc.Button([
+                        html.I(className="fas fa-download", style={'marginRight': '4px'}),
+                        "Export JSON"
+                    ], id='export-btn', color="outline-success",
+                       size="sm", className="export-btn w-100 mb-1"),
+
+                    html.Hr(style={'margin': '10px 0', 'borderColor': '#e9ecef'}),
+
+                    # ── Session ───────────────────────────────
+                    html.Label("Session",
+                               style={'fontWeight': '600', 'fontSize': '12px',
+                                      'marginBottom': '6px', 'display': 'block'}),
+                    dbc.Button([
+                        html.I(className="fas fa-save", style={'marginRight': '4px'}),
+                        "Save Session"
+                    ], id='save-session-btn', color="outline-info",
+                       size="sm", className="w-100 mb-1"),
+                    dbc.Button([
+                        html.I(className="fas fa-folder-open", style={'marginRight': '4px'}),
+                        "Load Session"
+                    ], id='load-session-btn', color="outline-info",
+                       size="sm", className="w-100 mb-2"),
 
                     html.P([
                         html.I(className="fas fa-hand-pointer",
                                style={'marginRight': '5px', 'color': '#1565c0'}),
-                        "Lasso-select genes on the volcano to run pathway enrichment."
-                    ], style={'fontSize': '11px', 'color': '#666',
+                        "Lasso-select genes on the volcano to run enrichment."
+                    ], style={'fontSize': '10px', 'color': '#888',
                                'lineHeight': '1.5', 'marginBottom': '0'}),
-                ], style={'padding': '14px'})
+
+                ], style={'padding': '12px', 'maxHeight': 'calc(100vh - 120px)',
+                          'overflowY': 'auto'})
             ], className="shadow-sm", style={'position': 'sticky', 'top': '12px'})
         ], xs=12, md=3, style={'marginBottom': '12px'}),
 
@@ -865,6 +967,16 @@ app.layout = dbc.Container([
     dbc.Row([dbc.Col([
         html.Div(id='session-info', style={'fontSize':'11px','color':'#666','textAlign':'center','marginBottom':'8px'})
     ], width=12)]),
+
+    # ── HIDDEN COMPAT COMPONENTS (preserve callback wiring) ────────────────────
+    # demo-btn, lfc-slider, pval-slider were sidebar-only controls now replaced
+    # by load-demo-btn, lfc-thresh-slider, padj-thresh-dd — kept hidden so
+    # any callback that still reads them doesn't raise a missing-component error.
+    html.Div([
+        dbc.Button(id='demo-btn', style={'display': 'none'}),
+        dcc.Slider(id='lfc-slider', value=1.0, style={'display': 'none'}),
+        dcc.Slider(id='pval-slider', value=2, style={'display': 'none'}),
+    ], style={'display': 'none'}),
 
     # ── ENHANCED STORES ────────────────────────────────
     dcc.Store(id='dge-data-store'),
