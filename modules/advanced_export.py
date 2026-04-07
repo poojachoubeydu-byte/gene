@@ -42,7 +42,8 @@ class AdvancedExporter:
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 # Sheet 1: Selected Genes Detail
                 if not gene_data.empty:
-                    selected_df = gene_data[gene_data.get('gene_symbol', gene_data.get('symbol', pd.Series())).isin(selected_genes)]
+                    gene_col = next((c for c in ['gene_symbol', 'symbol'] if c in gene_data.columns), None)
+                    selected_df = gene_data[gene_data[gene_col].isin(selected_genes)] if gene_col else pd.DataFrame()
                     if not selected_df.empty:
                         selected_df = selected_df.sort_values(
                             by='log2_fold_change' if 'log2_fold_change' in selected_df.columns else 'log2FC',
@@ -172,9 +173,10 @@ class AdvancedExporter:
             if gene_data.empty or not selected_genes:
                 return b'No genes selected'
             
-            selected_df = gene_data[
-                gene_data.get('gene_symbol', gene_data.get('symbol', pd.Series())).isin(selected_genes)
-            ]
+            gene_col = next((c for c in ['gene_symbol', 'symbol'] if c in gene_data.columns), None)
+            if gene_col is None:
+                return b'No gene symbol column found'
+            selected_df = gene_data[gene_data[gene_col].isin(selected_genes)]
             return selected_df.to_csv(index=False).encode('utf-8')
         except Exception as e:
             logger.error(f"Error exporting selected genes CSV: {str(e)}")

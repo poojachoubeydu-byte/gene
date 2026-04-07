@@ -1546,7 +1546,7 @@ def update_upload_style(contents, current_style):
 # ── CALLBACK 9: Advanced Analytics & PDF Report ───────────────────────────
 
 @app.callback(
-    Output('download-results', 'data'),
+    Output('download-results', 'data', allow_duplicate=True),
     Output('integrity-display', 'children'),
     Input('download-pdf-btn', 'n_clicks'),
     State('dge-data-store', 'data'),
@@ -1938,13 +1938,13 @@ def update_progress_indicator(n_intervals, progress_data):
             return html.Div()
             
         summary = tracker.get_summary()
-        if not summary or summary.get('status') == 'completed':
+        if not summary or summary.get('progress_percentage', 0) == 100:
             return html.Div()
         
         # Generate progress HTML
         progress_html = html.Div([
             html.Div([
-                html.Span(f"⏳ {operation}", style={'fontWeight': '600', 'fontSize': '12px'}),
+                html.Span(f"⏳ {summary.get('operation', active_op)}", style={'fontWeight': '600', 'fontSize': '12px'}),
                 html.Span(f"{summary['progress_percentage']}%", 
                          style={'float': 'right', 'fontSize': '11px', 'color': '#666'})
             ], style={'marginBottom': '6px', 'display': 'flex', 'justifyContent': 'space-between'}),
@@ -1974,7 +1974,7 @@ def update_progress_indicator(n_intervals, progress_data):
     
     except Exception as e:
         logger.debug(f"Progress update error: {str(e)}")
-        return ''
+        return html.Div()
 
 
 # ── CALLBACK 20: Batch Mode - Toggle Section ───────────────────────────────

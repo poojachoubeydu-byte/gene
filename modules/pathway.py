@@ -281,7 +281,10 @@ def get_leading_edge_genes(pathway_results: pd.DataFrame, deg_results: pd.DataFr
         return []
 
     pathway_row = pathway_results[pathway_results['pathway'] == pathway_name].iloc[0]
-    pathway_genes = set(pathway_row['genes'].split(';'))
+    genes_val = pathway_row.get('genes') if hasattr(pathway_row, 'get') else pathway_row['genes']
+    if not genes_val or pd.isna(genes_val):
+        return []
+    pathway_genes = set(str(genes_val).split(';'))
 
     # Get DEG genes that are in the pathway
     deg_pathway = deg_results[deg_results['gene_symbol'].str.upper().isin(pathway_genes)]

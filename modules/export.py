@@ -15,26 +15,52 @@ import numpy as np
 
 
 def compute_data_integrity_score(df: pd.DataFrame) -> dict:
+    import re
+
+    if df is None or df.empty:
+        return {
+            'total': 0, 'grade': 'D',
+            'components': {'completeness': 0, 'symbol_format': 0, 'pvalue_distribution': 0, 'fc_symmetry': 0},
+            'n_genes': 0, 'n_significant': 0, 'sig_fraction': 0.0
+        }
+
     total_cells = df.shape[0] * df.shape[1]
     missing = df.isnull().sum().sum()
-    completeness = round((1 - missing / total_cells) * 25, 1)
+    completeness = round((1 - missing / max(total_cells, 1)) * 25, 1)
 
-    import re
-    pattern = re.compile(r'^[A-Z][A-Z0-9\-]{1,19}$')
-    valid = df['symbol'].astype(str).apply(lambda x: bool(pattern.match(x))).mean()
-    symbol_format = round(valid * 25, 1)
-
-    sig_frac = (df['padj'] < 0.05).mean()
-    if 0.01 <= sig_frac <= 0.40:
-        p_score = 25.0
-    elif sig_frac < 0.01 or sig_frac > 0.60:
-        p_score = 5.0
+    # Detect symbol column (support both naming conventions)
+    symbol_col = next((c for c in ['symbol', 'gene_symbol'] if c in df.columns), None)
+    if symbol_col:
+        pattern = re.compile(r'^[A-Za-z][A-Za-z0-9\-]{1,19}$')
+        valid = df[symbol_col].astype(str).apply(lambda x: bool(pattern.match(x))).mean()
+        symbol_format = round(valid * 25, 1)
     else:
-        p_score = 15.0
+        symbol_format = 0.0
 
-    pos_frac = (df['log2FC'] > 0).mean()
-    symmetry = 1 - abs(pos_frac - 0.5) * 2
-    fc_symmetry = round(symmetry * 25, 1)
+    # Detect padj column
+    padj_col = next((c for c in ['padj', 'adjusted_p_value'] if c in df.columns), None)
+    if padj_col:
+        sig_frac = (df[padj_col] < 0.05).mean()
+        if 0.01 <= sig_frac <= 0.40:
+            p_score = 25.0
+        elif sig_frac < 0.01 or sig_frac > 0.60:
+            p_score = 5.0
+        else:
+            p_score = 15.0
+        n_significant = int((df[padj_col] < 0.05).sum())
+    else:
+        sig_frac = 0.0
+        p_score = 0.0
+        n_significant = 0
+
+    # Detect log2FC column
+    lfc_col = next((c for c in ['log2FC', 'log2_fold_change'] if c in df.columns), None)
+    if lfc_col:
+        pos_frac = (df[lfc_col] > 0).mean()
+        symmetry = 1 - abs(pos_frac - 0.5) * 2
+        fc_symmetry = round(symmetry * 25, 1)
+    else:
+        fc_symmetry = 0.0
 
     total = round(completeness + symbol_format + p_score + fc_symmetry, 1)
     grade = 'A' if total >= 90 else 'B' if total >= 75 else 'C' if total >= 60 else 'D'
@@ -49,7 +75,7 @@ def compute_data_integrity_score(df: pd.DataFrame) -> dict:
             'fc_symmetry': fc_symmetry
         },
         'n_genes': len(df),
-        'n_significant': int((df['padj'] < 0.05).sum()),
+        'n_significant': n_significant,
         'sig_fraction': round(sig_frac * 100, 1)
     }
 
@@ -136,14 +162,17 @@ def generate_pdf_report(df: pd.DataFrame,
     story.append(Spacer(1, 0.3*cm))
 
     story.append(Paragraph('3. Top 10 Differentially Expressed Genes', h2_style))
-    top_degs = df.sort_values('padj', ascending=True).head(10)
+    symbol_col = next((c for c in ['symbol', 'gene_symbol'] if c in df.columns), None)
+    padj_col = next((c for c in ['padj', 'adjusted_p_value'] if c in df.columns), None)
+    lfc_col = next((c for c in ['log2FC', 'log2_fold_change'] if c in df.columns), None)
+    top_degs = df.sort_values(padj_col, ascending=True).head(10) if padj_col else df.head(10)
     headers = ['Gene', 'Log2FC', 'Adj. P-value']
     data = [headers]
     for _, row in top_degs.iterrows():
         data.append([
-            str(row['symbol']),
-            f"{row['log2FC']:.3f}",
-            f"{row['padj']:.2e}"
+            str(row[symbol_col]) if symbol_col else 'N/A',
+            f"{row[lfc_col]:.3f}" if lfc_col else 'N/A',
+            f"{row[padj_col]:.2e}" if padj_col else 'N/A'
         ])
     table = Table(data, colWidths=[5*cm, 4*cm, 4*cm])
     table.setStyle(TableStyle([

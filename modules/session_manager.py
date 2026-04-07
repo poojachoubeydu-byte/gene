@@ -57,8 +57,7 @@ class SessionManager:
             # Store in cache
             key = f"session:{session_name}"
             self.cache[key] = serializable_data
-            self.cache.close()
-            
+
             logger.info(f"Session saved: {session_name}")
             return {
                 'success': True,

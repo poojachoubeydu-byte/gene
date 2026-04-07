@@ -73,7 +73,7 @@ class DataValidator:
             # Try common alternatives
             for alt in ['symbol', 'gene', 'gene_name', 'id', 'name']:
                 if alt in df.columns:
-                    df = df.rename(columns={alt: 'gene_symbol'})
+                    df.rename(columns={alt: 'gene_symbol'}, inplace=True)
                     break
             else:
                 errors.append("Missing gene_symbol column")
@@ -159,7 +159,7 @@ class DataValidator:
                         found_alt = alt
                         break
                 if found_alt:
-                    df = df.rename(columns={found_alt: col})
+                    df.rename(columns={found_alt: col}, inplace=True)
                 else:
                     missing_cols.append(col)
 
