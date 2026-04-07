@@ -290,16 +290,24 @@ class EnrichmentAnalyzer:
         gene_list: List[str],
         padj_threshold: float = 0.05,
         background: int = 20_000,
+        strict: bool = True,
         gene_lfc_map: Optional[Dict[str, float]] = None,
         gene_nlp_map: Optional[Dict[str, float]] = None,
     ) -> pd.DataFrame:
+        # Normalise gene symbols here so callers don't need to
+        gene_list = [g.strip().upper() for g in gene_list if g and g.strip()]
         df = _run_enrichment(
             gene_list, self.pathways, self.database_name,
             background=background,
             gene_lfc_map=gene_lfc_map,
             gene_nlp_map=gene_nlp_map,
         )
-        return df[df["adjusted_p_value"] <= padj_threshold] if not df.empty else df
+        if df.empty:
+            return df
+        # Strict mode: filter on BH-adjusted p-value (robust, conservative)
+        # Relaxed mode: filter on nominal p-value (more results, exploratory)
+        filter_col = "adjusted_p_value" if strict else "p_value"
+        return df[df[filter_col] <= padj_threshold].reset_index(drop=True)
 
     def get_enriched_pathways(
         self,
@@ -307,11 +315,12 @@ class EnrichmentAnalyzer:
         padj_threshold: float = 0.05,
         top_n: Optional[int] = None,
         background: int = 20_000,
+        strict: bool = True,
         gene_lfc_map: Optional[Dict[str, float]] = None,
         gene_nlp_map: Optional[Dict[str, float]] = None,
     ) -> pd.DataFrame:
         df = self.run_enrichment(
-            gene_list, padj_threshold, background, gene_lfc_map, gene_nlp_map
+            gene_list, padj_threshold, background, strict, gene_lfc_map, gene_nlp_map
         )
         return df.head(top_n) if (top_n and not df.empty) else df
 
@@ -338,12 +347,13 @@ class MultiDatabaseEnrichment:
         gene_list: List[str],
         padj_threshold: float = 0.05,
         background: int = 20_000,
+        strict: bool = True,
         gene_lfc_map: Optional[Dict[str, float]] = None,
         gene_nlp_map: Optional[Dict[str, float]] = None,
     ) -> pd.DataFrame:
         parts = [
             a.run_enrichment(
-                gene_list, padj_threshold, background, gene_lfc_map, gene_nlp_map
+                gene_list, padj_threshold, background, strict, gene_lfc_map, gene_nlp_map
             )
             for a in self.analyzers.values()
         ]

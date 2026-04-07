@@ -221,31 +221,44 @@ def _run_enrichment(
     db_choice: str,
     gene_lfc_map: dict | None = None,
     gene_nlp_map: dict | None = None,
+    background: int = 20_000,
+    strict: bool = True,
 ) -> pd.DataFrame:
     """
     Run pathway enrichment and attach activation z-scores + effect-weighted
     scores when LFC/NLP maps are supplied.
 
-    padj_threshold: 0.05 (v3.0, tightened from 0.5) — returns only
-    statistically reliable pathways by default.  Downstream views still
-    show all returned rows; users see fewer but higher-confidence results.
+    strict=True  → filter on BH-adjusted p-value ≤ 0.05 (conservative)
+    strict=False → filter on nominal p-value ≤ 0.05 (relaxed / exploratory)
+
+    background should be set to the actual number of genes in the loaded
+    dataset so the Fisher 2×2 table reflects the real experiment, not a
+    hardcoded genome-wide estimate.
     """
     if not sig_genes:
         return pd.DataFrame()
+    # Normalise symbols defensively before any lookup
+    sig_genes = [g.strip().upper() for g in sig_genes if g and str(g).strip()]
+    if not sig_genes:
+        return pd.DataFrame()
     try:
-        analyzer  = _get_analyzer(db_choice)
-        lfc_map   = gene_lfc_map or {}
-        nlp_map   = gene_nlp_map or {}
+        analyzer = _get_analyzer(db_choice)
+        lfc_map  = gene_lfc_map or {}
+        nlp_map  = gene_nlp_map or {}
         if db_choice == "all":
             return analyzer.run_multi_enrichment(
                 sig_genes,
                 padj_threshold=0.05,
+                background=background,
+                strict=strict,
                 gene_lfc_map=lfc_map,
                 gene_nlp_map=nlp_map,
             )
         return analyzer.run_enrichment(
             sig_genes,
             padj_threshold=0.05,
+            background=background,
+            strict=strict,
             gene_lfc_map=lfc_map,
             gene_nlp_map=nlp_map,
         )
@@ -341,6 +354,25 @@ SIDEBAR = dbc.Col([
             value="all",
             labelStyle={"display": "block", "fontSize": 12, "marginBottom": 3},
             inputStyle={"marginRight": 5},
+        ),
+
+        html.Hr(className="my-2"),
+        _section_head("🎯", "Enrichment Mode",
+                      "Strict = FDR-corrected · Relaxed = nominal p"),
+        dcc.RadioItems(
+            id="enr-mode",
+            options=[
+                {"label": "Strict  (FDR adj. p < 0.05)", "value": "strict"},
+                {"label": "Relaxed  (nominal p < 0.05)", "value": "relaxed"},
+            ],
+            value="strict",
+            labelStyle={"display": "block", "fontSize": 12, "marginBottom": 3},
+            inputStyle={"marginRight": 5},
+        ),
+        dbc.Alert(
+            "💡 Use Relaxed for large selections (> 1 000 genes) where FDR "
+            "correction is overly conservative.",
+            color="info", className="py-1 px-2 mt-1 small",
         ),
 
         html.Hr(className="my-2"),
@@ -778,24 +810,30 @@ def cb_volcano_fig(rec, lfc_t, p_t, active_tab):
     Input("lfc-thresh",  "value"),
     Input("p-thresh",    "value"),
     Input("pathway-db",  "value"),
+    Input("enr-mode",    "value"),
     Input("volcano",     "selectedData"),
     Input("tabs",        "active_tab"),
     prevent_initial_call=True,
 )
-def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
+def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, active_tab):
     if active_tab != "tab-volcano":
         return (dash.no_update,) * 5
     try:
-        df      = _s2df(rec)
-        lasso = bool(sel and sel.get("points"))
+        df    = _s2df(rec)
+        # Background = actual dataset size so Fisher table is calibrated correctly
+        background = max(len(df), 1)
+        strict     = (enr_mode != "relaxed")
+        lasso      = bool(sel and sel.get("points"))
 
         if lasso:
             pts = sel["points"]
             # Primary: extract from customdata[0] (gene name stored there)
+            # Always strip + uppercase for consistent DB matching
             genes = list(dict.fromkeys(
-                str(pt["customdata"][0])
+                str(pt["customdata"][0]).strip().upper()
                 for pt in pts
-                if pt.get("customdata") and str(pt["customdata"][0]).strip()
+                if pt.get("customdata")
+                   and str(pt["customdata"][0]).strip()
                    and str(pt["customdata"][0]) not in ("0", "0.0", "nan", "")
             ))
             # Fallback: if customdata missing (e.g. from WebGL traces), match
@@ -803,19 +841,19 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
             if not genes:
                 sel_x = {round(pt["x"], 6) for pt in pts if "x" in pt}
                 sel_y = {round(pt["y"], 6) for pt in pts if "y" in pt}
-                df_tmp = _s2df(rec).copy()
+                df_tmp = df.copy()
                 df_tmp["_nlp"] = -np.log10(df_tmp["padj"].clip(lower=1e-300))
                 genes = df_tmp[
                     df_tmp["log2FC"].round(6).isin(sel_x) |
                     df_tmp["_nlp"].round(6).isin(sel_y)
-                ]["symbol"].astype(str).str.upper().tolist()
+                ]["symbol"].astype(str).str.strip().str.upper().tolist()
                 genes = list(dict.fromkeys(genes))
                 log.info(f"lasso: customdata missing, used xy-fallback → {len(genes)} genes")
             else:
                 log.info(f"lasso: customdata → {len(genes)} genes")
         else:
             mask  = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
-            genes = df.loc[mask, "symbol"].str.upper().tolist()
+            genes = df.loc[mask, "symbol"].astype(str).str.strip().str.upper().tolist()
 
         # Build gene → LFC/NLP maps for activation z-score + effect-weighted score
         ref = df.copy()
@@ -824,9 +862,22 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
         gene_lfc_map = ref.set_index("_sym")["log2FC"].to_dict()
         gene_nlp_map = ref.set_index("_sym")["_nlp"].to_dict()
 
-        enr = _run_enrichment(genes, db, gene_lfc_map, gene_nlp_map)
+        enr = _run_enrichment(
+            genes, db, gene_lfc_map, gene_nlp_map,
+            background=background, strict=strict,
+        )
 
-        # Selection badge
+        # ── Selection badge + large-selection warning ──────────────────────
+        TOO_LARGE = 2000
+        warn_block = []
+        if len(genes) > TOO_LARGE:
+            warn_block = [dbc.Alert(
+                f"⚠️ {len(genes):,} genes selected — enrichment loses statistical power "
+                f"above {TOO_LARGE:,} genes. Consider switching to Relaxed mode or "
+                "narrowing your selection.",
+                color="warning", className="py-1 px-2 mb-1 small",
+            )]
+
         if lasso:
             chips = [
                 dbc.Badge(g, color="primary", className="me-1", style={"fontSize": 10})
@@ -836,20 +887,31 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
                 [html.Small(f"…+{len(genes)-20} more", className="text-muted")]
                 if len(genes) > 20 else []
             )
+            mode_badge = dbc.Badge(
+                "Relaxed" if not strict else "Strict",
+                color="warning" if not strict else "secondary",
+                className="ms-2", style={"fontSize": 9},
+            )
             counter = html.Div([
-                html.Span(f"🔬 {len(genes)} genes selected  ",
+                *warn_block,
+                html.Span(f"🔬 {len(genes):,} genes selected  ",
                           className="fw-bold text-primary small"),
+                mode_badge,
+                html.Br(),
                 *chips, *overflow,
                 html.Br(),
                 html.Small("Enrichment running on this subset ↓",
                            className="text-muted fst-italic"),
             ])
         else:
-            counter = html.Small(
-                f"Showing all {len(genes)} significant genes "
-                "(lasso/box-select the volcano to analyse a subset)",
-                className="text-muted",
-            )
+            counter = html.Div([
+                *warn_block,
+                html.Small(
+                    f"Showing all {len(genes):,} significant genes "
+                    "(lasso/box-select the volcano to analyse a subset)",
+                    className="text-muted",
+                ),
+            ])
 
         return (
             create_pathway_bubble(enr),
