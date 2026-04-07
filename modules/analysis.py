@@ -361,8 +361,10 @@ def run_gsea_preranked(df: pd.DataFrame) -> dict:
         # Prefer nominal p-value for ranking; fall back to padj
         p_col = "pvalue" if "pvalue" in df.columns else "padj"
 
+        _df = df.copy()
+        _df["symbol"] = _df["symbol"].astype(str).str.upper().str.strip()
         rank = (
-            df.copy()
+            _df
             .assign(
                 rank_metric=lambda d: (
                     np.sign(d["log2FC"])

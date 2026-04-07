@@ -82,6 +82,9 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
             hovertemplate=ht,
         ))
 
+    # Ensure gene column is string before any .str operations
+    df[gene_col] = df[gene_col].astype(str)
+
     # ── Oncogene overlay (star marker, gold border) ──────────────────────────
     onco_up = df[
         up &

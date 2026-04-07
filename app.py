@@ -155,6 +155,19 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
     if not {"symbol", "log2FC", "padj"}.issubset(df.columns):
         cols = df.columns.tolist()
         df   = df.rename(columns={cols[0]: "symbol", cols[1]: "log2FC", cols[2]: "padj"})
+
+    # If the symbol column contains numeric values (e.g. Entrez IDs), find the
+    # first object-dtype column with short string values and use that instead.
+    _reserved = {"log2FC", "padj", "pvalue", "baseMean"}
+    if not pd.api.types.is_object_dtype(df["symbol"]):
+        for c in df.columns:
+            if c not in _reserved and c != "symbol" and pd.api.types.is_object_dtype(df[c]):
+                df = df.rename(columns={"symbol": "__entrez_id", c: "symbol"})
+                break
+
+    # Always cast symbol to string so .str accessor never fails downstream
+    df["symbol"] = df["symbol"].astype(str).str.strip()
+
     df["log2FC"] = pd.to_numeric(df["log2FC"], errors="coerce")
     # DESeq2 / edgeR output regularly has NA padj for low-count genes (independent
     # filtering). Coerce those to 1.0 (non-significant) so NO genes are dropped.
@@ -624,7 +637,7 @@ def cb_banner(rec, lfc_t, p_t):
     # Count drug targets among significant genes
     sig_genes = df.loc[
         (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t), "symbol"
-    ].str.upper().tolist()
+    ].astype(str).str.upper().tolist()
     from data.gene_annotations import DRUG_GENE_INTERACTIONS
     n_drug = sum(1 for g in sig_genes if g in DRUG_GENE_INTERACTIONS)
 
@@ -739,7 +752,7 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, sel, active_tab):
 
         # Build gene → LFC/NLP maps for activation z-score + effect-weighted score
         ref = df.copy()
-        ref["_sym"] = ref["symbol"].str.strip().str.upper()
+        ref["_sym"] = ref["symbol"].astype(str).str.strip().str.upper()
         ref["_nlp"] = -np.log10(ref["padj"].clip(lower=1e-300))
         gene_lfc_map = ref.set_index("_sym")["log2FC"].to_dict()
         gene_nlp_map = ref.set_index("_sym")["_nlp"].to_dict()
@@ -1009,7 +1022,7 @@ def cb_biomarker(rec, active_tab):
         fig    = create_biomarker_score_chart(bm_df)
 
         # Cancer gene table
-        all_genes = df["symbol"].str.upper().tolist()
+        all_genes = df["symbol"].astype(str).str.upper().tolist()
         cg_df = get_cancer_gene_info(all_genes)
         if cg_df.empty:
             cancer_tbl = html.P("No COSMIC cancer genes found in this dataset.",
