@@ -474,11 +474,25 @@ MAIN = dbc.Col([
                     width=8,
                 ),
                 dbc.Col(
-                    html.Div(id="sel-counter",
-                             className="text-muted small text-end align-self-center"),
+                    dcc.Loading(
+                        html.Div(id="sel-counter",
+                                 className="text-muted small text-end align-self-center"),
+                        type="dot",
+                    ),
                     width=4,
                 ),
             ], className="px-2 pt-1"),
+            # ── Enrichment status bar — visible while callback is running ──────
+            dbc.Row([
+                dbc.Col(
+                    dcc.Loading(
+                        html.Div(id="enr-status", className="small px-1"),
+                        type="default",
+                        color="#1a5276",
+                    ),
+                    width=12,
+                ),
+            ], className="px-2"),
             dbc.Row([
                 dbc.Col(dcc.Loading(
                     dcc.Graph(id="volcano", style={"height": 460},
@@ -796,6 +810,72 @@ def cb_meta(rec):
         return blank(str(e)), html.P(str(e), className="text-danger small")
 
 
+# ── Selection-to-Enrichment helpers ───────────────────────────────────────────
+
+def _genes_from_selected(sel) -> list:
+    """
+    Extract gene symbols from Plotly selectedData.
+    customdata[:, 0] holds the gene symbol for every trace in the volcano.
+    Returns a de-duplicated list of clean uppercase symbols.
+    """
+    if not sel or not sel.get("points"):
+        return []
+    genes = []
+    for pt in sel["points"]:
+        cd = pt.get("customdata")
+        if cd:
+            sym = str(cd[0]).strip().strip('"').strip("'").upper()
+            if sym and sym not in ("0", "0.0", "NAN", ""):
+                genes.append(sym)
+    return list(dict.fromkeys(genes))  # preserve order, deduplicate
+
+
+def _genes_from_relayout(relayout, df: pd.DataFrame) -> list:
+    """
+    Extract gene symbols by filtering the FULL master dataframe with the
+    box-selection coordinates stored in relayoutData.
+
+    Plotly.js emits the selection rectangle in two formats depending on version:
+      • Flat keys: relayoutData["selections[0].x0"], ..., .x1, .y0, .y1
+      • Nested:    relayoutData["selections"][0]["x0"] …
+
+    y-axis of the volcano is −log10(padj) so we derive _nlp from the store.
+    Returns a de-duplicated list of clean uppercase symbols.
+    """
+    if not relayout:
+        return []
+
+    sel_obj = None
+    # Form A: nested list (newer Plotly.js)
+    sels = relayout.get("selections")
+    if sels and isinstance(sels, list) and len(sels) > 0:
+        sel_obj = sels[0]
+    else:
+        # Form B: flat dotted keys (older Plotly.js / Dash serialisation)
+        x0 = relayout.get("selections[0].x0")
+        x1 = relayout.get("selections[0].x1")
+        y0 = relayout.get("selections[0].y0")
+        y1 = relayout.get("selections[0].y1")
+        if None not in (x0, x1, y0, y1):
+            sel_obj = {"x0": x0, "x1": x1, "y0": y0, "y1": y1}
+
+    if not sel_obj:
+        return []
+
+    try:
+        lx0 = min(float(sel_obj["x0"]), float(sel_obj["x1"]))
+        lx1 = max(float(sel_obj["x0"]), float(sel_obj["x1"]))
+        ly0 = min(float(sel_obj["y0"]), float(sel_obj["y1"]))
+        ly1 = max(float(sel_obj["y0"]), float(sel_obj["y1"]))
+    except (KeyError, TypeError, ValueError):
+        return []
+
+    # Filter against the FULL dataframe (not the decimated 5 000-point plot)
+    nlp = -np.log10(df["padj"].clip(lower=1e-300))
+    mask = df["log2FC"].between(lx0, lx1) & nlp.between(ly0, ly1)
+    return df.loc[mask, "symbol"].map(_clean_sym).tolist()
+
+
 # ── Volcano figure (redraws only on data/threshold changes, NOT on selection) ─
 @app.callback(
     Output("volcano", "figure"),
@@ -817,63 +897,70 @@ def cb_volcano_fig(rec, lfc_t, p_t, active_tab):
 
 # ── Enrichment (triggered by lasso OR data/threshold changes) ─────────────────
 @app.callback(
-    Output("bubble",     "figure"),
-    Output("path-bar",   "figure"),
-    Output("path-table", "children"),
-    Output("enr-store",  "data"),
-    Output("sel-counter","children"),
-    Input("store",       "data"),
-    Input("lfc-thresh",  "value"),
-    Input("p-thresh",    "value"),
-    Input("pathway-db",  "value"),
-    Input("enr-mode",    "value"),
-    Input("volcano",     "selectedData"),
-    Input("tabs",        "active_tab"),
+    Output("bubble",      "figure"),
+    Output("path-bar",    "figure"),
+    Output("path-table",  "children"),
+    Output("enr-store",   "data"),
+    Output("sel-counter", "children"),
+    Output("enr-status",  "children"),
+    Input("store",        "data"),
+    Input("lfc-thresh",   "value"),
+    Input("p-thresh",     "value"),
+    Input("pathway-db",   "value"),
+    Input("enr-mode",     "value"),
+    Input("volcano",      "selectedData"),
+    Input("volcano",      "relayoutData"),
+    Input("tabs",         "active_tab"),
     prevent_initial_call=True,
 )
-def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, active_tab):
+def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, relayout, active_tab):
     if active_tab != "tab-volcano":
-        return (dash.no_update,) * 5
+        return (dash.no_update,) * 6
+
+    # If the ONLY thing that changed is relayoutData and it carries no selection
+    # change (i.e. the user just panned/zoomed), skip a full enrichment re-run.
+    triggered = {p["prop_id"] for p in dash.callback_context.triggered} \
+                if dash.callback_context.triggered else set()
+    if triggered == {"volcano.relayoutData"}:
+        has_sel_change = relayout and (
+            "selections" in relayout or
+            any(k.startswith("selections[") for k in relayout)
+        )
+        if not has_sel_change:
+            return (dash.no_update,) * 6
+
     try:
-        df    = _s2df(rec)
-        # Background = actual dataset size so Fisher table is calibrated correctly
+        df         = _s2df(rec)
         background = max(len(df), 1)
         strict     = (enr_mode != "relaxed")
-        lasso      = bool(sel and sel.get("points"))
 
-        if lasso:
-            pts = sel["points"]
-            # Primary: extract from customdata[0] (gene name stored there)
-            # Always strip + uppercase for consistent DB matching
-            genes = list(dict.fromkeys(
-                str(pt["customdata"][0]).strip().upper()
-                for pt in pts
-                if pt.get("customdata")
-                   and str(pt["customdata"][0]).strip()
-                   and str(pt["customdata"][0]) not in ("0", "0.0", "nan", "")
-            ))
-            # Fallback: if customdata missing (e.g. from WebGL traces), match
-            # selected x/y coordinates back to the dataframe
-            if not genes:
-                sel_x = {round(pt["x"], 6) for pt in pts if "x" in pt}
-                sel_y = {round(pt["y"], 6) for pt in pts if "y" in pt}
-                df_tmp = df.copy()
-                df_tmp["_nlp"] = -np.log10(df_tmp["padj"].clip(lower=1e-300))
-                genes = df_tmp[
-                    df_tmp["log2FC"].round(6).isin(sel_x) |
-                    df_tmp["_nlp"].round(6).isin(sel_y)
-                ]["symbol"].astype(str).str.strip().str.upper().tolist()
-                genes = list(dict.fromkeys(genes))
-                log.info(f"lasso: customdata missing, used xy-fallback → {len(genes)} genes")
-            else:
-                log.info(f"lasso: customdata → {len(genes)} genes")
-        else:
+        # ── Gene extraction: 3-tier pipeline ─────────────────────────────
+        # Tier 1 — relayoutData box coordinates: box-select fires this for
+        #           BOTH SVG and WebGL traces; filters the FULL 17k master
+        #           store so ALL genes inside the drawn rectangle are captured
+        #           even when the volcano is decimated to 5 000 visible points.
+        genes = _genes_from_relayout(relayout, df)
+        source = "box-coords"
+
+        # Tier 2 — selectedData: lasso-select on go.Scatter (SVG) traces.
+        #           relayoutData carries an SVG path for lasso (no x0/y0/x1/y1)
+        #           so _genes_from_relayout returns [] and we fall back here.
+        if not genes:
+            genes  = _genes_from_selected(sel)
+            source = "lasso" if genes else source
+
+        # Tier 3 — threshold fallback (no active user selection)
+        selection_active = bool(genes)
+        if not genes:
             mask  = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
-            genes = df.loc[mask, "symbol"].astype(str).str.strip().str.upper().tolist()
+            genes = df.loc[mask, "symbol"].map(_clean_sym).tolist()
+            source = "threshold"
 
-        # Build gene → LFC/NLP maps for activation z-score + effect-weighted score
+        log.info(f"enrichment source={source}  n_genes={len(genes)}")
+
+        # ── Build LFC / NLP maps (use full df, not decimated plot) ───────
         ref = df.copy()
-        ref["_sym"] = ref["symbol"].astype(str).str.strip().str.upper()
+        ref["_sym"] = ref["symbol"].map(_clean_sym)
         ref["_nlp"] = -np.log10(ref["padj"].clip(lower=1e-300))
         gene_lfc_map = ref.set_index("_sym")["log2FC"].to_dict()
         gene_nlp_map = ref.set_index("_sym")["_nlp"].to_dict()
@@ -883,19 +970,41 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, active_tab):
             background=background, strict=strict,
         )
 
-        # ── Selection badge + large-selection warning ──────────────────────
-        TOO_LARGE = 2000
+        # ── Status bar ───────────────────────────────────────────────────
+        mode_label  = "Relaxed (nominal p)" if not strict else "Strict (FDR adj.)"
+        auto_relaxed = (not enr.empty and enr.get("_mode", pd.Series()).eq("relaxed").any()
+                        if "_mode" in enr.columns else False)
+        n_paths = len(enr)
+        status_color = "success" if n_paths > 0 else "warning"
+        status_msg = (
+            f"✅ {n_paths} pathway{'s' if n_paths != 1 else ''} found  "
+            f"· {len(genes):,} genes  · {mode_label}"
+            + ("  · ⚡ auto-relaxed" if auto_relaxed else "")
+        ) if n_paths > 0 else (
+            f"⚠️ No pathways found for {len(genes):,} genes "
+            f"({mode_label}) — try Relaxed mode or narrow your selection"
+        )
+        enr_status = dbc.Alert(status_msg, color=status_color,
+                               className="py-1 px-2 mb-0 small")
+
+        # ── Large-selection warning ───────────────────────────────────────
+        TOO_LARGE  = 2000
         warn_block = []
         if len(genes) > TOO_LARGE:
             warn_block = [dbc.Alert(
-                f"⚠️ {len(genes):,} genes selected — enrichment loses statistical power "
-                f"above {TOO_LARGE:,} genes. Consider switching to Relaxed mode or "
-                "narrowing your selection.",
+                f"⚠️ {len(genes):,} genes selected — enrichment loses statistical "
+                f"power above {TOO_LARGE:,}. Switch to Relaxed mode or narrow selection.",
                 color="warning", className="py-1 px-2 mb-1 small",
             )]
 
-        if lasso:
-            chips = [
+        # ── Selection counter badge ───────────────────────────────────────
+        mode_badge = dbc.Badge(
+            "Relaxed" if not strict else "Strict",
+            color="warning" if not strict else "secondary",
+            className="ms-2", style={"fontSize": 9},
+        )
+        if selection_active:
+            chips    = [
                 dbc.Badge(g, color="primary", className="me-1", style={"fontSize": 10})
                 for g in genes[:20]
             ]
@@ -903,30 +1012,26 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, active_tab):
                 [html.Small(f"…+{len(genes)-20} more", className="text-muted")]
                 if len(genes) > 20 else []
             )
-            mode_badge = dbc.Badge(
-                "Relaxed" if not strict else "Strict",
-                color="warning" if not strict else "secondary",
-                className="ms-2", style={"fontSize": 9},
+            src_badge = dbc.Badge(
+                source.replace("box-coords", "box (full dataset)").replace("lasso", "lasso"),
+                color="info", className="ms-1", style={"fontSize": 9},
             )
             counter = html.Div([
                 *warn_block,
                 html.Span(f"🔬 {len(genes):,} genes selected  ",
                           className="fw-bold text-primary small"),
-                mode_badge,
-                html.Br(),
-                *chips, *overflow,
-                html.Br(),
-                html.Small("Enrichment running on this subset ↓",
-                           className="text-muted fst-italic"),
+                mode_badge, src_badge,
+                html.Br(), *chips, *overflow,
             ])
         else:
             counter = html.Div([
                 *warn_block,
                 html.Small(
-                    f"Showing all {len(genes):,} significant genes "
-                    "(lasso/box-select the volcano to analyse a subset)",
+                    f"Showing {len(genes):,} significant genes "
+                    "(lasso or box-select the volcano to enrich a subset)",
                     className="text-muted",
                 ),
+                mode_badge,
             ])
 
         return (
@@ -935,11 +1040,15 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, active_tab):
             _enr_table(enr),
             enr.to_dict("records") if not enr.empty else [],
             counter,
+            enr_status,
         )
+
     except Exception as e:
         log.error(f"volcano_enr: {e}")
         emp = blank(str(e))
-        return emp, emp, html.P(str(e), className="text-danger"), [], ""
+        err_status = dbc.Alert(f"❌ Error: {e}", color="danger",
+                               className="py-1 px-2 mb-0 small")
+        return emp, emp, html.P(str(e), className="text-danger small"), [], "", err_status
 
 
 # ── Crosstalk heatmap (driven by enr-store so it's a separate callback) ────────

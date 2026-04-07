@@ -205,6 +205,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=11)),
         dragmode="select",           # default tool = box-select; user can switch to lasso
         clickmode="event+select",    # enable both click and select events
+        hovermode="closest",         # WebGL layer captures hover/click on nearest point
         margin=dict(t=60),
         # Pre-declare the selections array and newselection style so Plotly.js
         # registers them as known schema properties before the user draws anything.
