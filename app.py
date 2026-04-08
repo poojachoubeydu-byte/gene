@@ -23,12 +23,14 @@ import logging
 import os
 from datetime import datetime
 
-# ── Load .env before anything else reads os.environ ──────────────────────────
+# ── Load .env for LOCAL development only ─────────────────────────────────────
+# override=False means system/session env vars (HF Space secrets) always win.
+# If no .env file exists, this is a no-op.
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=False)
 except ImportError:
-    pass  # python-dotenv not installed; rely on environment variables directly
+    pass  # python-dotenv not installed — rely on os.environ directly
 
 # ── Startup key check — visible in terminal before Dash server starts ─────────
 _gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -37,6 +39,21 @@ print("=" * 55)
 print(f"[Apex AI]  GEMINI_API_KEY : {'✅ Detected (primary)' if _gemini_key else '❌ Missing'}")
 print(f"[Apex AI]  GROQ_API_KEY   : {'✅ Detected (fallback)' if _groq_key   else '❌ Missing'}")
 print("=" * 55)
+
+
+def _startup_badge():
+    """Build the Research Copilot badge from os.environ at server start time.
+    Called once during layout construction — no network calls, no callbacks.
+    Returns a dbc.Badge reflecting the actual available AI engine."""
+    import dash_bootstrap_components as _dbc
+    if os.environ.get("GEMINI_API_KEY", "").strip():
+        return _dbc.Badge("Online · Gemini 2.5 Flash", color="success",
+                          style={"fontSize": 9})
+    if os.environ.get("GROQ_API_KEY", "").strip():
+        return _dbc.Badge("Online · Groq Llama 3", color="info",
+                          style={"fontSize": 9})
+    return _dbc.Badge("Offline · Rule-Based", color="secondary",
+                      style={"fontSize": 9})
 
 import dash
 import dash_bootstrap_components as dbc
@@ -515,10 +532,14 @@ SIDEBAR = dbc.Col([
                 html.Span("✨ ", style={"fontSize": 15}),
                 html.Strong("Research Copilot",
                             style={"fontSize": 11, "color": "#1a5276"}),
-                # Badge is populated dynamically by cb_ai_summary — no static
-                # "Powered by Groq" here so it can't lie when Rule-Based runs.
-                html.Div(id="sidebar-ai-badge", className="ms-1",
-                         style={"display": "inline-block"}),
+                # Badge is pre-populated at server start from os.environ so it
+                # is correct from the very first render — no interval needed.
+                html.Div(
+                    id="sidebar-ai-badge",
+                    children=_startup_badge(),
+                    className="ms-1",
+                    style={"display": "inline-block"},
+                ),
             ], className="d-flex align-items-center mb-1"),
             dcc.Loading(
                 html.Div(
@@ -893,14 +914,9 @@ def cb_sig_store(rec, lfc_t, p_t):
     prevent_initial_call=True,
 )
 def cb_refresh_tabs(_):
-    # Re-read .env so any newly added API keys are picked up without restarting.
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
-    except ImportError:
-        pass
-    # Clearing enr-store forces enrichment to re-run on the Volcano tab.
-    # Clearing all cache fingerprints forces lazy-tab analyses to re-run.
+    # Clears all dcc.Store caches so every tab re-runs its analysis.
+    # cb_key_status (also triggered by refresh-tab-btn) re-checks env vars
+    # and updates the AI badge immediately.
     return None, None, None, None, []
 
 
@@ -913,13 +929,9 @@ def cb_refresh_tabs(_):
     prevent_initial_call=True,
 )
 def cb_key_status(_interval, _refresh):
-    # Re-read .env every time this fires so new keys are picked up immediately.
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
-    except ImportError:
-        pass
-
+    # Read live os.environ — no load_dotenv() here.
+    # On HF Spaces, secrets are in os.environ from process start.
+    # On local dev, startup load_dotenv(override=False) has already run.
     from modules.ai_summary import check_available_model
     label, color = check_available_model()
     badge = dbc.Badge(label, color=color, style={"fontSize": 9})
@@ -2073,17 +2085,22 @@ def cb_ai_summary(active_tab, _refresh_clicks, sig_rec, enr_rec, full_rec, bm_re
         summary, powered_by = get_biological_story(context_data, active_tab=active_tab)
     except Exception as exc:
         log.error(f"cb_ai_summary: {exc}")
-        summary, powered_by = (
-            f"AI interpretation unavailable: {exc}",
-            "Rule-Based · Offline",
-        )
+        summary    = f"AI interpretation unavailable: {exc}"
+        powered_by = ""
 
-    is_offline  = "Offline" in powered_by or "Rule" in powered_by
-    is_live     = not is_offline
-    badge_color = ("success" if ("Groq" in powered_by or "Anthropic" in powered_by)
-                   else ("info" if "Gemini" in powered_by else "secondary"))
-    badge  = dbc.Badge(powered_by, color=badge_color, style={"fontSize": 9})
-    status = html.Span(["⚡ Powered by ", badge])
+    # ── Badge always reflects KEY AVAILABILITY, not last call result ──────────
+    # This means a transient API failure never flips the badge to "Offline".
+    from modules.ai_summary import check_available_model
+    badge_label, badge_color = check_available_model()
+    badge  = dbc.Badge(badge_label, color=badge_color, style={"fontSize": 9})
+
+    # Status line shows which model actually generated this response
+    if powered_by and "Rule" not in powered_by and "Offline" not in powered_by:
+        status = html.Span(["⚡ Powered by ", html.B(powered_by)])
+    elif powered_by:
+        status = html.Span(powered_by, className="text-muted")
+    else:
+        status = html.Span("")
 
     return (
         dcc.Markdown(summary, style={"fontSize": 11, "lineHeight": "1.65"}),
