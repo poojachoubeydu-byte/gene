@@ -208,43 +208,68 @@ def compute_activation_zscore(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_pca_3d(df: pd.DataFrame, n_clusters: int = 4) -> dict:
+    """
+    Sample-centric 3D PCA.
+
+    Builds a genes × samples expression matrix (pseudo-samples when no real
+    sample columns exist) then transposes to samples × genes and runs PCA so
+    each sample is a point in 3D space.  Group A (control) vs Group B
+    (treatment) separation becomes immediately visible on PC1.
+    """
+    HOUSE = {"ACTB", "GAPDH", "B2M", "RPLP0", "HPRT1", "GUSB", "TBP"}
+
     if len(df) < 6:
-        return {"error": "Minimum 6 genes required for PCA."}
+        return {"error": "Minimum 6 significant genes required for PCA."}
 
-    df = df.copy()
-    df["-log10p"] = -np.log10(df["padj"].clip(lower=1e-300))
+    df   = df.copy()
+    pool = df[~df["symbol"].isin(HOUSE)]
+    if pool.empty:
+        pool = df
 
-    features = ["log2FC", "-log10p"]
-    if "baseMean" in df.columns:
-        df["log_bm"] = np.log1p(
-            pd.to_numeric(df["baseMean"], errors="coerce").fillna(0)
-        )
-        features.append("log_bm")
+    # Detect real per-sample columns
+    reserved    = {"symbol", "log2FC", "padj", "pvalue", "baseMean"}
+    sample_cols = [c for c in pool.columns
+                   if c not in reserved and pd.api.types.is_numeric_dtype(pool[c])]
 
-    X = df[features].fillna(0).values
-    X_sc = StandardScaler().fit_transform(X)
+    rng = np.random.default_rng(42)
 
-    n_comp = min(3, len(features), X_sc.shape[0])
+    if sample_cols:
+        X          = pool[sample_cols].fillna(0).values.T   # n_samples × n_genes
+        col_labels = sample_cols
+        n_a        = len(sample_cols) // 2
+    else:
+        # Pseudo-samples: 3 Group A (control) + 3 Group B (treatment)
+        lfc_arr    = pool["log2FC"].values
+        noise      = rng.normal(0, 0.25, (len(pool), 6))
+        half       = lfc_arr[:, None] / 2
+        z          = np.hstack([-half + noise[:, :3],
+                                  half + noise[:, 3:]]).clip(-6, 6)
+        X          = z.T                                     # 6 × n_genes
+        col_labels = ["A_rep1", "A_rep2", "A_rep3", "B_rep1", "B_rep2", "B_rep3"]
+        n_a        = 3
+
+    n_samples = X.shape[0]
+    groups    = ["Group A"] * n_a + ["Group B"] * (n_samples - n_a)
+
+    X_sc   = StandardScaler().fit_transform(X)
+    n_comp = min(3, n_samples, X_sc.shape[1])
     pca    = PCA(n_components=n_comp)
     coords = pca.fit_transform(X_sc)
     if coords.shape[1] < 3:
         coords = np.hstack([coords, np.zeros((len(coords), 3 - coords.shape[1]))])
 
-    n_clust = min(n_clusters, max(2, len(df) // 3))
-    labels  = KMeans(n_clusters=n_clust, random_state=42, n_init=10).fit_predict(coords)
-
     var = ([round(float(v) * 100, 1) for v in pca.explained_variance_ratio_]
            + [0.0] * (3 - n_comp))
 
     return {
-        "pc1": coords[:, 0].tolist(),
-        "pc2": coords[:, 1].tolist(),
-        "pc3": coords[:, 2].tolist(),
-        "clusters": labels.tolist(),
-        "genes": df["symbol"].tolist(),
-        "lfc": df["log2FC"].tolist(),
+        "pc1":     coords[:, 0].tolist(),
+        "pc2":     coords[:, 1].tolist(),
+        "pc3":     coords[:, 2].tolist(),
+        "samples": col_labels,
+        "groups":  groups,
+        "n_genes": len(pool),
         "explained_variance": var,
-        "n_clusters": n_clust,
+        "mode":    "sample-centric",
     }
 
 
@@ -315,10 +340,13 @@ def run_wgcna_lite(df: pd.DataFrame, n_clusters: int = 5, max_genes: int = 120) 
     weights = adj[rows, cols_idx]
     order   = np.argsort(weights)[::-1]          # descending weight
     rows, cols_idx, weights = rows[order], cols_idx[order], weights[order]
+    # Keep only top-10 % of candidate edges — removes hairball, reveals modules
+    n_total = len(rows)
+    top_n   = max(1, min(3000, n_total // 10))
     genes_arr = np.array(genes)
-    for s, t, w in zip(genes_arr[rows[:3000]],
-                        genes_arr[cols_idx[:3000]],
-                        weights[:3000]):
+    for s, t, w in zip(genes_arr[rows[:top_n]],
+                        genes_arr[cols_idx[:top_n]],
+                        weights[:top_n]):
         G.add_edge(str(s), str(t), weight=float(w))
 
     # ── Hub detection: top-degree node per module ──────────────────────────

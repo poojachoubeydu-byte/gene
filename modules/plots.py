@@ -691,22 +691,41 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
 
     gene_labels = top["symbol"].tolist()
 
+    # ── Row-wise Z-score normalization ───────────────────────────────────────
+    # Normalise each gene across its samples so colour contrast reflects
+    # relative within-gene expression change, not absolute LFC magnitude.
+    from scipy.stats import zscore as _zscore
+    from scipy.cluster.hierarchy import linkage as _hclust, leaves_list as _leaves
+    from scipy.spatial.distance import pdist as _pdist
+
+    with np.errstate(invalid="ignore"):
+        z = _zscore(z, axis=1)
+    z = np.nan_to_num(z, nan=0.0)   # zero-variance genes → flat row of 0s
+
+    # ── Hierarchical clustering: reorder rows to group co-regulated genes ────
+    if len(gene_labels) > 2:
+        dist  = _pdist(z, metric="euclidean")
+        link  = _hclust(dist, method="ward")
+        order = _leaves(link)
+        z          = z[order]
+        gene_labels = [gene_labels[i] for i in order]
+
     fig = go.Figure(go.Heatmap(
         z=z,
         x=col_labels,
         y=gene_labels,
         colorscale="RdBu",
-        reversescale=False,   # Red = high/upregulated, Blue = low/downregulated
-        zmid=0, zmin=-6, zmax=6,
+        reversescale=False,   # Red = high, Blue = low
+        zmid=0, zmin=-2.5, zmax=2.5,   # Z-score range
         zsmooth="fast",
         hovertemplate=(
             "Gene: <b>%{y}</b><br>Sample: %{x}<br>"
-            "Expression: %{z:.2f}<extra></extra>"
+            "Z-score: %{z:.2f}<extra></extra>"
         ),
         colorbar=dict(
-            title="Log2 Expr",
+            title="Z-score",
             thickness=12,
-            tickvals=[-6, -3, 0, 3, 6],
+            tickvals=[-2, -1, 0, 1, 2],
         ),
     ))
 
@@ -740,7 +759,7 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
         title=dict(
             text=(f"Sample Expression Heatmap — Top {len(top)} Genes "
                   f"<span style='font-size:10px;color:#888;'>"
-                  f"(ranked by |LFC|×−log10p)"
+                  f"(row-wise Z-score · hierarchical clustering)"
                   + (" · pseudo-samples" if not sample_cols else "")
                   + "</span>"),
             font=dict(size=13),
@@ -762,31 +781,36 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def create_pca_3d(res: dict) -> go.Figure:
-    clusters = np.array(res["clusters"])
-    genes    = res["genes"]
-    var      = res["explained_variance"]
-    lfc      = res.get("lfc", [0] * len(genes))
+    """Sample-centric PCA: each dot is a sample, coloured by experimental group."""
+    var     = res["explained_variance"]
+    samples = res["samples"]
+    groups  = res["groups"]
+
+    GROUP_COLORS = {"Group A": "#27ae60", "Group B": "#8e44ad"}
 
     fig = go.Figure()
-    for k in range(res["n_clusters"]):
-        m = clusters == k
+    for grp, color in GROUP_COLORS.items():
+        m = [g == grp for g in groups]
         fig.add_trace(go.Scatter3d(
-            x=np.array(res["pc1"])[m],
-            y=np.array(res["pc2"])[m],
-            z=np.array(res["pc3"])[m],
-            mode="markers",
-            name=f"Cluster {k + 1}",
-            marker=dict(size=6, color=CLUSTER_PAL[k % len(CLUSTER_PAL)], opacity=0.87),
-            text=[g for g, b in zip(genes, m) if b],
+            x=[x for x, b in zip(res["pc1"], m) if b],
+            y=[y for y, b in zip(res["pc2"], m) if b],
+            z=[z for z, b in zip(res["pc3"], m) if b],
+            mode="markers+text",
+            name=grp,
+            text=[s for s, b in zip(samples, m) if b],
+            textposition="top center",
+            textfont=dict(size=10),
+            marker=dict(size=11, color=color, opacity=0.92,
+                        line=dict(width=1, color="white")),
             hovertemplate="<b>%{text}</b><br>PC1 %{x:.3f}  PC2 %{y:.3f}  PC3 %{z:.3f}<extra></extra>",
         ))
     fig.update_layout(
         template="simple_white", height=520,
         title=dict(
-            text=(f"3D PCA Projection"
+            text=(f"Sample-Centric 3D PCA"
                   f"<br><span style='font-size:11px;color:#888;'>"
                   f"PC1 {var[0]:.1f}%  PC2 {var[1]:.1f}%  PC3 {var[2]:.1f}%"
-                  f"  |  {res['n_clusters']} clusters  {len(genes)} genes</span>"),
+                  f"  |  {res['n_genes']} significant genes as features</span>"),
             font=dict(size=14),
         ),
         scene=dict(
@@ -794,7 +818,7 @@ def create_pca_3d(res: dict) -> go.Figure:
             yaxis_title=f"PC2 ({var[1]:.1f}%)",
             zaxis_title=f"PC3 ({var[2]:.1f}%)",
         ),
-        legend=dict(title="Cluster"),
+        legend=dict(title="Sample Group"),
         margin=dict(l=0, r=0, t=80, b=0),
     )
     return fig
@@ -809,7 +833,9 @@ def create_network_graph(network_data: dict) -> go.Figure:
     if G is None or G.number_of_nodes() < 3:
         return blank("Not enough correlated genes at current threshold.")
 
-    pos     = nx.spring_layout(G, seed=42, k=2.5)
+    # Force-directed layout: k scales with node count so modules spread apart
+    _k  = 2.0 / max(1, G.number_of_nodes() ** 0.5)
+    pos = nx.spring_layout(G, seed=42, k=_k, iterations=80)
     lfc_map = network_data.get("lfc_values", {})
     modules = network_data.get("labels", {})
 

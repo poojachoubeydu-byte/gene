@@ -1204,35 +1204,27 @@ def cb_crosstalk(records, active_tab):
     Output("pca",      "figure"),
     Output("pca-info", "children"),
     Output("cache-pca", "data", allow_duplicate=True),
-    Input("tabs",      "active_tab"),
-    Input("store",     "data"),
-    State("data-fp",   "data"),
-    State("cache-pca", "data"),
-    State("lfc-thresh", "value"),
-    State("p-thresh",   "value"),
+    Input("tabs",       "active_tab"),
+    State("sig-store",  "data"),
+    State("data-fp",    "data"),
+    State("cache-pca",  "data"),
     prevent_initial_call=True,
 )
-def cb_pca(active_tab, rec, fp, cache_fp, lfc_t, p_t):
+def cb_pca(active_tab, sig_rec, fp, cache_fp):
     if active_tab != "tab-pca":
         return dash.no_update, dash.no_update, dash.no_update
     if cache_fp and cache_fp == fp:
-        return dash.no_update, dash.no_update, dash.no_update  # already fresh
-    lfc_t = lfc_t or 1.0
-    p_t   = p_t   or 0.05
+        return dash.no_update, dash.no_update, dash.no_update
     try:
-        df  = _s2df(rec)
-        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
-        pca_df = sig if len(sig) >= 6 else df
-        res = run_pca_3d(pca_df)
+        sig = _s2df(sig_rec)
+        res = run_pca_3d(sig)
         if "error" in res:
             return blank(res["error"]), res["error"], None
         v = res["explained_variance"]
-        label = "significant genes" if len(sig) >= 6 else "all genes (< 6 significant)"
         return (
             create_pca_3d(res),
-            (f"{res['n_clusters']} clusters  |  variance: "
-             f"PC1 {v[0]:.1f}%  PC2 {v[1]:.1f}%  PC3 {v[2]:.1f}%  "
-             f"|  {len(res['genes'])} {label}"),
+            (f"Sample-centric PCA  |  {res['n_genes']} genes as features  "
+             f"|  variance: PC1 {v[0]:.1f}%  PC2 {v[1]:.1f}%  PC3 {v[2]:.1f}%"),
             fp,
         )
     except Exception as e:
