@@ -27,8 +27,7 @@ import dash_bootstrap_components as dbc
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import diskcache
-from dash import DiskcacheManager, Input, Output, State, ctx, dash_table, dcc, html
+from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 # ── local modules ─────────────────────────────────────────────────────────────
 from modules.analysis import (
@@ -66,9 +65,6 @@ from data.gene_annotations import get_drug_targets, get_cancer_gene_info
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ── Background-callback manager (diskcache — no Redis/Celery needed) ──────────
-_bg_cache  = diskcache.Cache("/tmp/apex_bg_cache")   # /tmp is writable in all containers
-_bg_manager = DiskcacheManager(_bg_cache)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,7 +89,6 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Apex Bioinformatics",
     meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
-    background_callback_manager=_bg_manager,
 )
 server = app.server   # Gunicorn entry point
 
@@ -720,21 +715,19 @@ MAIN = dbc.Col([
                             dbc.Badge("Groq · Llama 3 · Free tier", color="info",
                                       className="ms-2", style={"fontSize": 10}),
                         ]),
-                        dbc.CardBody([
-                            html.Div(
-                                dbc.Spinner(color="primary", size="sm"),
-                                id="ai-summary-spinner",
-                                style={"display": "none", "marginBottom": "8px"},
-                            ),
-                            html.Div(
-                                id="ai-summary-text",
-                                children=html.Small(
-                                    "Open this tab to generate an AI-powered summary "
-                                    "of your top genes and pathways.",
-                                    className="text-muted",
+                        dbc.CardBody(
+                            dcc.Loading(
+                                html.Div(
+                                    id="ai-summary-text",
+                                    children=html.Small(
+                                        "Open this tab to generate an AI-powered summary "
+                                        "of your top genes and pathways.",
+                                        className="text-muted",
+                                    ),
                                 ),
-                            ),
-                        ]),
+                                type="dot", color="#1a5276",
+                            )
+                        ),
                     ], outline=True, className="mb-4",
                        style={"borderColor": "#1a5276"}),
 
@@ -1726,21 +1719,14 @@ def dl_bm_csv(n, rec):
     return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "biomarker_scores.csv", index=False)
 
 
-# ── AI Biological Summary (background — non-blocking, Groq free tier) ─────────
+# ── AI Biological Summary (lazy — fires only when Insights tab opens) ──────────
+# Uses a standard callback + dcc.Loading spinner. Gunicorn's multiple workers
+# handle concurrency so other users are never blocked during the API call.
 @app.callback(
     Output("ai-summary-text", "children"),
     Input("tabs",      "active_tab"),
     State("sig-store", "data"),
     State("enr-store", "data"),
-    background=True,
-    running=[
-        (Output("ai-summary-spinner", "style"),
-         {"display": "block", "marginBottom": "8px"},
-         {"display": "none"}),
-        (Output("ai-summary-text", "style"),
-         {"opacity": "0.35", "pointerEvents": "none"},
-         {"opacity": "1",    "pointerEvents": "auto"}),
-    ],
     prevent_initial_call=True,
 )
 def cb_ai_summary(active_tab, sig_rec, enr_rec):
