@@ -32,6 +32,7 @@ _SYSTEM_PROMPT = (
 def _build_prompt(context_data: dict) -> str:
     top_genes    = context_data.get("top_genes",    [])
     top_pathways = context_data.get("top_pathways", [])
+    extra        = context_data.get("extra",        "")
 
     gene_block = "\n".join(
         f"  {g['symbol']}: Log2FC = {float(g['log2FC']):+.3f}"
@@ -43,12 +44,15 @@ def _build_prompt(context_data: dict) -> str:
         or "  No significantly enriched pathways detected."
     )
 
+    extra_block = f"\nAdditional context: {extra}\n" if extra else ""
+
     return (
         "Interpret these RNA-seq differential expression results:\n\n"
         f"Top Significant Genes (ranked by |LFC| × −log10p meta-score):\n"
         f"{gene_block}\n\n"
         f"Top Enriched Pathways:\n"
-        f"{pathway_block}\n\n"
+        f"{pathway_block}\n"
+        f"{extra_block}\n"
         "Write a concise 3–5 sentence biological interpretation. Cover:\n"
         "1. The most likely biological process or disease context.\n"
         "2. Whether the pattern indicates pathway activation or inhibition.\n"
@@ -142,7 +146,7 @@ def _rule_based_summary(context_data: dict) -> str:
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_biological_story(context_data: dict) -> tuple[str, str]:
+def get_biological_story(context_data: dict, **kwargs) -> tuple[str, str]:
     """
     Waterfall: Groq (Llama 3 70B) → Gemini 1.5 Flash → Rule-Based.
 

@@ -402,7 +402,7 @@ SIDEBAR = dbc.Col([
     html.Div([
         html.Div("🧬", style={"fontSize": 36}),
         html.H5("Apex Bioinformatics", className="mb-0 text-white fw-bold"),
-        html.Small("v3.4.1 — Significant-First", className="text-white-50"),
+        html.Small("v3.7 — Research Copilot", className="text-white-50"),
     ], className="p-3 text-center",
        style={"background": "linear-gradient(135deg,#1a5276,#117a65)"}),
 
@@ -485,6 +485,40 @@ SIDEBAR = dbc.Col([
             html.Small("🔒 Data stays in your browser session.",
                        className="text-muted"),
         ], className="px-1 pb-2"),
+
+        html.Hr(className="my-2"),
+
+        # ── ✨ Global Research Copilot (visible on all 8 tabs) ────────────────
+        html.Div([
+            html.Div([
+                html.Span("✨ ", style={"fontSize": 15}),
+                html.Strong("Research Copilot",
+                            style={"fontSize": 11, "color": "#1a5276"}),
+                dbc.Badge(
+                    "Powered by Groq",
+                    color="info",
+                    className="ms-1",
+                    style={"fontSize": 9},
+                ),
+            ], className="d-flex align-items-center mb-1"),
+            dcc.Loading(
+                html.Div(
+                    id="sidebar-ai-text",
+                    children=html.Small(
+                        "Switch to any tab to get an AI interpretation.",
+                        className="text-muted",
+                    ),
+                    style={"fontSize": 11, "maxHeight": 200,
+                           "overflowY": "auto", "lineHeight": "1.65"},
+                ),
+                type="dot", color="#1a5276",
+            ),
+            html.Div(id="sidebar-ai-status",
+                     style={"fontSize": 10, "marginTop": 4}),
+        ], className="px-1 pb-2",
+           style={"background": "rgba(26,82,118,0.06)",
+                  "border": "1px solid rgba(26,82,118,0.18)",
+                  "borderRadius": 6, "padding": "8px 8px 6px"}),
 
     ], className="p-2"),
 ], width=3, className="bg-light border-end",
@@ -707,35 +741,17 @@ MAIN = dbc.Col([
             dbc.Row([
                 dbc.Col([
 
-                    # ── AI Summary Card ───────────────────────────────────
-                    dbc.Card([
-                        dbc.CardHeader([
-                            html.Span("🤖 ", style={"fontSize": 18}),
-                            html.Strong("Automated Biological Summary"),
-                            dbc.Badge("Groq → Gemini → Rule-Based", color="info",
-                                      className="ms-2", style={"fontSize": 10}),
-                        ]),
-                        dbc.CardBody(
-                            dcc.Loading(
-                                html.Div(
-                                    id="ai-summary-text",
-                                    children=html.Small(
-                                        "Open this tab to generate an AI-powered summary "
-                                        "of your top genes and pathways.",
-                                        className="text-muted",
-                                    ),
-                                ),
-                                type="dot", color="#1a5276",
-                            )
-                        ),
-                        dbc.CardFooter(
-                            html.Div(id="ai-status", className="small text-muted"),
-                            style={"padding": "5px 16px",
-                                   "background": "#f8f9fa",
-                                   "borderTop": "1px solid #dee2e6"},
-                        ),
-                    ], outline=True, className="mb-4",
-                       style={"borderColor": "#1a5276"}),
+                    # ── AI Research Copilot moved to global sidebar ────────
+                    dbc.Alert(
+                        [
+                            html.Span("✨ ", style={"fontSize": 14}),
+                            "The ",
+                            html.Strong("Research Copilot"),
+                            " (Powered by Groq) is now in the left sidebar "
+                            "and updates automatically as you switch tabs.",
+                        ],
+                        color="info", className="py-2 px-3 mb-3 small",
+                    ),
 
                     # ── Rule-based Insights ───────────────────────────────
                     html.H5("🔬 Auto-Generated Biological Insights",
@@ -1725,61 +1741,134 @@ def dl_bm_csv(n, rec):
     return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "biomarker_scores.csv", index=False)
 
 
-# ── AI Biological Summary (lazy — fires only when Insights tab opens) ──────────
-# Uses a standard callback + dcc.Loading spinner. Gunicorn's multiple workers
-# handle concurrency so other users are never blocked during the API call.
+# ── Research Copilot: context-aware AI sidebar (fires on every tab change) ──────
+# Outputs to sidebar-ai-text / sidebar-ai-status so the copilot is always
+# visible regardless of the active tab.  Gunicorn workers handle concurrency.
 @app.callback(
-    Output("ai-summary-text", "children"),
-    Output("ai-status",       "children"),
+    Output("sidebar-ai-text",   "children"),
+    Output("sidebar-ai-status", "children"),
     Input("tabs",      "active_tab"),
     State("sig-store", "data"),
     State("enr-store", "data"),
+    State("store",     "data"),
+    State("bm-store",  "data"),
     prevent_initial_call=True,
 )
-def cb_ai_summary(active_tab, sig_rec, enr_rec):
-    if active_tab != "tab-insights":
-        return dash.no_update, dash.no_update
-
+def cb_ai_summary(active_tab, sig_rec, enr_rec, full_rec, bm_rec):
     from modules.ai_summary import get_biological_story
 
-    sig_df = _s2df(sig_rec)
+    sig_df  = _s2df(sig_rec)
+    enr_df  = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
+
     if sig_df.empty:
         return (
             html.Small(
-                "No significant genes found at current thresholds. "
-                "Adjust |Log2FC| or p-value cutoffs and revisit this tab.",
+                "No significant genes at current thresholds. "
+                "Adjust |Log2FC| or p-value cutoffs.",
                 className="text-muted",
             ),
             "",
         )
 
-    # Build context_data — identical format regardless of which tier runs
+    # ── Shared top-gene / pathway context (meta-score ranked) ─────────────────
     sig_df = sig_df.copy()
-    sig_df["_score"] = (sig_df["log2FC"].abs()
-                        * -np.log10(sig_df["padj"].clip(lower=1e-300)))
-    top_genes = (sig_df.nlargest(10, "_score")[["symbol", "log2FC"]]
-                 .to_dict("records"))
+    sig_df["_score"] = (
+        sig_df["log2FC"].abs()
+        * -np.log10(sig_df["padj"].clip(lower=1e-300))
+    )
+    top_genes = (
+        sig_df.nlargest(10, "_score")[["symbol", "log2FC"]].to_dict("records")
+    )
+    top_paths = (
+        enr_df.head(5)["pathway"].tolist()
+        if not enr_df.empty and "pathway" in enr_df.columns
+        else []
+    )
 
-    enr_df    = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
-    top_paths = (enr_df.head(5)["pathway"].tolist()
-                 if not enr_df.empty and "pathway" in enr_df.columns
-                 else [])
+    # ── Tab-specific extra context string ─────────────────────────────────────
+    extra_ctx = ""
+    if active_tab == "tab-meta":
+        if top_genes:
+            g0 = top_genes[0]
+            extra_ctx = (
+                f"Top meta-score gene: {g0['symbol']} "
+                f"(Log2FC {float(g0['log2FC']):+.2f}). "
+                f"{len(sig_df)} significant genes ranked."
+            )
+    elif active_tab == "tab-volcano":
+        n_up = int((sig_df["log2FC"] > 0).sum())
+        n_dn = int((sig_df["log2FC"] < 0).sum())
+        extra_ctx = (
+            f"{n_up} up-regulated and {n_dn} down-regulated significant genes. "
+            f"{len(top_paths)} enriched pathways detected."
+        )
+    elif active_tab == "tab-pca":
+        extra_ctx = (
+            f"3D PCA: {len(sig_df)} significant genes used as features. "
+            "Samples plotted as Group A (control) vs Group B (treatment)."
+        )
+    elif active_tab == "tab-adv":
+        extra_ctx = (
+            f"Heatmap: top {min(100, len(sig_df))} genes, row-wise Z-score, "
+            "Blue→White→Red colorscale (Red = high expression)."
+        )
+    elif active_tab == "tab-gsea":
+        extra_ctx = (
+            f"GSEA pre-ranked on {len(sig_df)} significant genes. "
+            + (f"Top GSEA pathway: {top_paths[0]}." if top_paths else "")
+        )
+    elif active_tab == "tab-net":
+        extra_ctx = (
+            f"Co-expression network (WGCNA-lite): {len(sig_df)} genes, "
+            "Top-10% strongest correlations, force-directed layout."
+        )
+    elif active_tab == "tab-drugs":
+        try:
+            from data.gene_annotations import DRUG_GENE_INTERACTIONS
+            sig_syms  = sig_df["symbol"].str.upper().tolist()
+            druggable = [g for g in sig_syms if g in DRUG_GENE_INTERACTIONS]
+            extra_ctx = (
+                f"{len(druggable)} of {len(sig_syms)} significant genes "
+                "have FDA-approved drugs. "
+                + (f"Key targets: {', '.join(druggable[:5])}." if druggable else "")
+            )
+        except Exception:
+            extra_ctx = f"{len(sig_df)} significant genes mapped to drug target database."
+    elif active_tab == "tab-bm":
+        extra_ctx = (
+            "Biomarker Priority Score = Meta-Score + clinical bonuses "
+            "(+15 FDA drug, +10 COSMIC Tier-1 cancer gene, +5 established biomarker)."
+        )
+    # tab-insights / fallback: no extra context needed
 
-    context_data = {"top_genes": top_genes, "top_pathways": top_paths}
-    summary, powered_by = get_biological_story(context_data)
+    context_data = {
+        "top_genes":    top_genes,
+        "top_pathways": top_paths,
+        "extra":        extra_ctx,
+    }
+
+    try:
+        summary, powered_by = get_biological_story(context_data, active_tab=active_tab)
+    except Exception as exc:
+        log.error(f"cb_ai_summary: {exc}")
+        summary, powered_by = (
+            f"AI interpretation unavailable: {exc}",
+            "Rule-Based · Offline",
+        )
 
     is_offline = "Offline" in powered_by or "Rule" in powered_by
+    is_groq    = "Groq" in powered_by
     status = html.Span([
         "⚡ Powered by ",
         dbc.Badge(
             powered_by,
-            color="secondary" if is_offline else "info",
-            style={"fontSize": 10},
+            color="success" if is_groq else ("secondary" if is_offline else "info"),
+            style={"fontSize": 9},
         ),
     ])
 
     return (
-        dcc.Markdown(summary, style={"fontSize": 13, "lineHeight": "1.75"}),
+        dcc.Markdown(summary, style={"fontSize": 11, "lineHeight": "1.65"}),
         status,
     )
 
