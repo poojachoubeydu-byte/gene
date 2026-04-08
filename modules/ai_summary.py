@@ -68,19 +68,27 @@ def _build_prompt(context_data: dict) -> str:
 def _call_groq(prompt: str) -> str:
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
+        print("[AI Copilot] Groq SKIPPED — GROQ_API_KEY not set")
         raise ValueError("GROQ_API_KEY not set")
     from groq import Groq
     client = Groq(api_key=api_key)
-    resp = client.chat.completions.create(
-        model="llama3-70b-8192",
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": prompt},
-        ],
-        max_tokens=400,
-        temperature=0.3,
-    )
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            max_tokens=400,
+            temperature=0.3,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as groq_exc:
+        # Capture the exact error type so we can distinguish
+        # AuthenticationError / RateLimitError / APIConnectionError etc.
+        err_type = type(groq_exc).__name__
+        print(f"[AI Copilot] Groq FAILED — {err_type}: {groq_exc}")
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,24 +170,33 @@ def get_biological_story(context_data: dict, **kwargs) -> tuple[str, str]:
         summary    — markdown-formatted biological interpretation
         powered_by — short label for the status badge in the UI
     """
+    # Fix 2 — explicit key detection printed to terminal on every AI call
+    _groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    print(f"[AI Copilot] GROQ_API_KEY : {'Detected' if _groq_key else 'None/Missing'}")
+
     prompt = _build_prompt(context_data)
 
     # Tier 1 — Groq
     try:
         text = _call_groq(prompt)
         log.info("AI summary: Groq (Llama 3 70B) succeeded")
+        print("[AI Copilot] Groq SUCCESS")
         return text, "Groq · Llama 3 70B"
     except Exception as exc:
         log.warning(f"AI summary: Groq failed — {exc}")
+        # exc details already printed inside _call_groq
 
     # Tier 2 — Gemini
     try:
         text = _call_gemini(prompt)
         log.info("AI summary: Gemini 1.5 Flash succeeded")
+        print("[AI Copilot] Gemini SUCCESS")
         return text, "Gemini · 1.5 Flash"
     except Exception as exc:
         log.warning(f"AI summary: Gemini failed — {exc}")
+        print(f"[AI Copilot] Gemini FAILED — {type(exc).__name__}: {exc}")
 
     # Tier 3 — Rule-Based (guaranteed)
+    print("[AI Copilot] Falling back to Rule-Based")
     log.info("AI summary: using rule-based fallback")
     return _rule_based_summary(context_data), "Rule-Based · Offline"

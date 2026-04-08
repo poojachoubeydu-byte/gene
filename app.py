@@ -20,7 +20,23 @@ Unique features not available in other free tools:
 import base64
 import io
 import logging
+import os
 from datetime import datetime
+
+# ── Load .env before anything else reads os.environ ──────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed; rely on environment variables directly
+
+# ── Startup key check — visible in terminal before Dash server starts ─────────
+_groq_key   = os.environ.get("GROQ_API_KEY",   "").strip()
+_gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+print("=" * 55)
+print(f"[Apex AI]  GROQ_API_KEY   : {'✅ Detected' if _groq_key   else '❌ Missing'}")
+print(f"[Apex AI]  GEMINI_API_KEY : {'✅ Detected' if _gemini_key else '❌ Missing (fallback)'}")
+print("=" * 55)
 
 import dash
 import dash_bootstrap_components as dbc
@@ -494,12 +510,10 @@ SIDEBAR = dbc.Col([
                 html.Span("✨ ", style={"fontSize": 15}),
                 html.Strong("Research Copilot",
                             style={"fontSize": 11, "color": "#1a5276"}),
-                dbc.Badge(
-                    "Powered by Groq",
-                    color="info",
-                    className="ms-1",
-                    style={"fontSize": 9},
-                ),
+                # Badge is populated dynamically by cb_ai_summary — no static
+                # "Powered by Groq" here so it can't lie when Rule-Based runs.
+                html.Div(id="sidebar-ai-badge", className="ms-1",
+                         style={"display": "inline-block"}),
             ], className="d-flex align-items-center mb-1"),
             dcc.Loading(
                 html.Div(
@@ -1747,6 +1761,7 @@ def dl_bm_csv(n, rec):
 @app.callback(
     Output("sidebar-ai-text",   "children"),
     Output("sidebar-ai-status", "children"),
+    Output("sidebar-ai-badge",  "children"),
     Input("tabs",      "active_tab"),
     State("sig-store", "data"),
     State("enr-store", "data"),
@@ -1768,6 +1783,7 @@ def cb_ai_summary(active_tab, sig_rec, enr_rec, full_rec, bm_rec):
                 className="text-muted",
             ),
             "",
+            dbc.Badge("Offline", color="secondary", style={"fontSize": 9}),
         )
 
     # ── Shared top-gene / pathway context (meta-score ranked) ─────────────────
@@ -1858,18 +1874,14 @@ def cb_ai_summary(active_tab, sig_rec, enr_rec, full_rec, bm_rec):
 
     is_offline = "Offline" in powered_by or "Rule" in powered_by
     is_groq    = "Groq" in powered_by
-    status = html.Span([
-        "⚡ Powered by ",
-        dbc.Badge(
-            powered_by,
-            color="success" if is_groq else ("secondary" if is_offline else "info"),
-            style={"fontSize": 9},
-        ),
-    ])
+    badge_color = "success" if is_groq else ("secondary" if is_offline else "info")
+    badge = dbc.Badge(powered_by, color=badge_color, style={"fontSize": 9})
+    status = html.Span(["⚡ Powered by ", badge])
 
     return (
         dcc.Markdown(summary, style={"fontSize": 11, "lineHeight": "1.65"}),
         status,
+        badge,
     )
 
 
