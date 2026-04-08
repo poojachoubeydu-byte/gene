@@ -696,7 +696,7 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
         x=col_labels,
         y=gene_labels,
         colorscale="RdBu",
-        reversescale=True,
+        reversescale=False,   # Red = high/upregulated, Blue = low/downregulated
         zmid=0, zmin=-6, zmax=6,
         zsmooth="fast",
         hovertemplate=(

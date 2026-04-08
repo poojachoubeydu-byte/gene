@@ -401,7 +401,7 @@ SIDEBAR = dbc.Col([
     html.Div([
         html.Div("🧬", style={"fontSize": 36}),
         html.H5("Apex Bioinformatics", className="mb-0 text-white fw-bold"),
-        html.Small("v3.3.0 (Absolute Integration)", className="text-white-50"),
+        html.Small("v3.4.1 — Significant-First", className="text-white-50"),
     ], className="p-3 text-center",
        style={"background": "linear-gradient(135deg,#1a5276,#117a65)"}),
 
@@ -495,11 +495,12 @@ SIDEBAR = dbc.Col([
 # ─────────────────────────────────────────────────────────────────────────────
 
 MAIN = dbc.Col([
-    dcc.Store(id="store",       storage_type="memory"),  # per-session DEG data
+    dcc.Store(id="store",       storage_type="memory"),  # per-session DEG data (full master)
+    dcc.Store(id="sig-store",   storage_type="memory"),  # pre-filtered significant genes only
     dcc.Store(id="enr-store",   storage_type="memory"),  # per-session enrichment results
     dcc.Store(id="bm-store",    storage_type="memory"),  # per-session biomarker scores
-    # ── Result cache fingerprints (cleared on new data / refresh) ──────────────
-    dcc.Store(id="data-fp",     storage_type="memory"),  # hash of current dataset
+    # ── Result cache fingerprints (cleared on new data / threshold change / refresh) ──
+    dcc.Store(id="data-fp",     storage_type="memory"),  # hash of dataset + thresholds
     dcc.Store(id="cache-pca",   storage_type="memory"),  # fp when PCA was last computed
     dcc.Store(id="cache-gsea",  storage_type="memory"),  # fp when GSEA was last computed
     dcc.Store(id="cache-net",   storage_type="memory"),  # fp when Network was last computed
@@ -765,24 +766,49 @@ def cb_ingest(contents, fname):
         )
 
 
-# ── Data fingerprint: updated on every new upload, clears all tab caches ──────
+# ── Data fingerprint: updated on new upload OR threshold change ────────────────
+# Including thresholds means lazy-tab caches (pca / gsea / net / bm) are busted
+# whenever the user adjusts sliders, so revisiting those tabs reruns analysis
+# on the correct significant subset rather than returning stale results.
 @app.callback(
     Output("data-fp",    "data"),
     Output("cache-pca",  "data"),
     Output("cache-gsea", "data"),
     Output("cache-net",  "data"),
     Output("cache-bm",   "data"),
-    Input("store", "data"),
+    Input("store",       "data"),
+    Input("lfc-thresh",  "value"),
+    Input("p-thresh",    "value"),
 )
-def cb_update_fp(rec):
+def cb_update_fp(rec, lfc_t, p_t):
     if not rec:
         return None, None, None, None, None
     import hashlib, json as _json
     sample = rec[:20] if isinstance(rec, list) else []
     fp = hashlib.md5(
-        _json.dumps(sample, sort_keys=True, default=str).encode()
+        _json.dumps({"d": sample, "lfc": lfc_t, "p": p_t},
+                    sort_keys=True, default=str).encode()
     ).hexdigest()[:12]
-    return fp, None, None, None, None  # new fingerprint + wipe all caches
+    return fp, None, None, None, None  # new fingerprint + wipe all lazy caches
+
+
+# ── Significant-gene pre-filter (Significant-First core engine) ───────────────
+# Runs on every data upload OR slider change; all analysis tabs consume this
+# pre-filtered store instead of reconstructing the full 50k-row DataFrame.
+@app.callback(
+    Output("sig-store", "data"),
+    Input("store",      "data"),
+    Input("lfc-thresh", "value"),
+    Input("p-thresh",   "value"),
+)
+def cb_sig_store(rec, lfc_t, p_t):
+    df = _s2df(rec)
+    if df.empty:
+        return []
+    lfc_t = lfc_t or 1.0
+    p_t   = p_t   or 0.05
+    sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+    return sig.to_dict("records") if not sig.empty else []
 
 
 # ── Refresh button: force-clears all tab caches ────────────────────────────────
@@ -844,17 +870,12 @@ def cb_banner(rec, lfc_t, p_t):
 @app.callback(
     Output("meta-bar", "figure"),
     Output("meta-table", "children"),
-    Input("store", "data"),
-    State("lfc-thresh", "value"),
-    State("p-thresh",   "value"),
+    Input("sig-store", "data"),
 )
-def cb_meta(rec, lfc_t, p_t):
-    lfc_t = lfc_t or 1.0
-    p_t   = p_t   or 0.05
+def cb_meta(sig_rec):
     try:
-        df   = _s2df(rec)
-        sig  = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
-        scored = compute_meta_score(sig if not sig.empty else df)
+        sig    = _s2df(sig_rec)
+        scored = compute_meta_score(sig)
         fig    = create_meta_score_bar(scored)
         filt   = scored[~scored["symbol"].isin(HOUSEKEEP)].sort_values(
             "meta_score", ascending=False
@@ -987,9 +1008,10 @@ def cb_volcano_fig(rec, lfc_t, p_t, active_tab):
     Input("volcano",      "selectedData"),
     Input("volcano",      "relayoutData"),
     Input("tabs",         "active_tab"),
+    State("sig-store",    "data"),
     prevent_initial_call=True,
 )
-def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, relayout, active_tab):
+def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, relayout, active_tab, sig_rec):
     if active_tab != "tab-volcano":
         return (dash.no_update,) * 6
 
@@ -1025,11 +1047,11 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, relayout, active_tab):
             genes  = _genes_from_selected(sel)
             source = "lasso" if genes else source
 
-        # Tier 3 — threshold fallback (no active user selection)
+        # Tier 3 — threshold fallback: read pre-filtered sig-store (avoids
+        #           rescanning the full 50k master df for this common case).
         selection_active = bool(genes)
         if not genes:
-            mask  = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
-            genes = df.loc[mask, "symbol"].map(_clean_sym).tolist()
+            genes  = _s2df(sig_rec)["symbol"].map(_clean_sym).tolist()
             source = "threshold"
 
         log.info(f"enrichment source={source}  n_genes={len(genes)}")
@@ -1225,21 +1247,19 @@ def cb_pca(active_tab, rec, fp, cache_fp, lfc_t, p_t):
     Output("pval-hist", "figure"),
     Output("lfc-dist",  "figure"),
     Output("rank-plot", "figure"),
-    Input("store",      "data"),
-    Input("lfc-thresh", "value"),
-    Input("p-thresh",   "value"),
+    Input("sig-store",  "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh",   "value"),
     Input("tabs",       "active_tab"),
     prevent_initial_call=True,
 )
-def cb_advanced(rec, lfc_t, p_t, active_tab):
+def cb_advanced(sig_rec, lfc_t, p_t, active_tab):
     if active_tab != "tab-adv":
         return (dash.no_update,) * 5
     lfc_t = lfc_t or 1.0
     p_t   = p_t   or 0.05
     try:
-        df  = _s2df(rec)
-        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
-        plot_df = sig if not sig.empty else df
+        plot_df = _s2df(sig_rec)
         return (
             create_ma_plot(plot_df),
             create_top_heatmap(plot_df, lfc_t, p_t),
@@ -1258,25 +1278,20 @@ def cb_advanced(rec, lfc_t, p_t, active_tab):
     Output("gsea-bar",   "figure"),
     Output("gsea-table", "children"),
     Output("cache-gsea", "data", allow_duplicate=True),
-    Input("tabs",  "active_tab"),
-    Input("store", "data"),
-    State("data-fp",    "data"),
-    State("cache-gsea", "data"),
-    State("lfc-thresh", "value"),
-    State("p-thresh",   "value"),
+    Input("tabs",        "active_tab"),
+    State("sig-store",   "data"),
+    State("data-fp",     "data"),
+    State("cache-gsea",  "data"),
     prevent_initial_call=True,
 )
-def cb_gsea(active_tab, rec, fp, cache_fp, lfc_t, p_t):
+def cb_gsea(active_tab, sig_rec, fp, cache_fp):
     if active_tab != "tab-gsea":
         return dash.no_update, dash.no_update, dash.no_update
     if cache_fp and cache_fp == fp:
         return dash.no_update, dash.no_update, dash.no_update
-    lfc_t = lfc_t or 1.0
-    p_t   = p_t   or 0.05
     try:
-        df  = _s2df(rec)
-        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
-        res = run_gsea_preranked(sig if not sig.empty else df)
+        sig = _s2df(sig_rec)
+        res = run_gsea_preranked(sig)
         if res.get("error"):
             return blank(f"GSEA: {res['error']}"), html.P(res["error"], className="text-muted small"), None
         results = res["results"]
@@ -1320,26 +1335,19 @@ def cb_gsea(active_tab, rec, fp, cache_fp, lfc_t, p_t):
     Output("network",  "figure"),
     Output("net-info", "children"),
     Output("cache-net", "data", allow_duplicate=True),
-    Input("tabs",  "active_tab"),
-    Input("store", "data"),
-    State("data-fp",   "data"),
-    State("cache-net", "data"),
-    State("lfc-thresh", "value"),
-    State("p-thresh",   "value"),
+    Input("tabs",       "active_tab"),
+    State("sig-store",  "data"),
+    State("data-fp",    "data"),
+    State("cache-net",  "data"),
     prevent_initial_call=True,
 )
-def cb_network(active_tab, rec, fp, cache_fp, lfc_t, p_t):
+def cb_network(active_tab, sig_rec, fp, cache_fp):
     if active_tab != "tab-net":
         return dash.no_update, dash.no_update, dash.no_update
     if cache_fp and cache_fp == fp:
         return dash.no_update, dash.no_update, dash.no_update
-    lfc_t = lfc_t or 1.0
-    p_t   = p_t   or 0.05
     try:
-        df  = _s2df(rec)
-        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
-        # Use significant genes (hard cap 200); fall back to full df if none
-        net_df = sig if not sig.empty else df
+        net_df = _s2df(sig_rec)
         # Count candidate genes before the internal max_genes cap so we can warn early
         n_candidates = len(net_df)
         res = run_wgcna_lite(net_df)
@@ -1380,24 +1388,23 @@ def cb_network(active_tab, rec, fp, cache_fp, lfc_t, p_t):
     Output("drug-scatter", "figure"),
     Output("drug-donut",   "figure"),
     Output("drug-table",   "children"),
-    Input("store",       "data"),
-    Input("lfc-thresh",  "value"),
-    Input("p-thresh",    "value"),
+    Input("sig-store",   "data"),
     Input("tabs",        "active_tab"),
+    State("store",       "data"),
     prevent_initial_call=True,
 )
-def cb_drugs(rec, lfc_t, p_t, active_tab):
+def cb_drugs(sig_rec, active_tab, full_rec):
     if active_tab != "tab-drugs":
         return (dash.no_update,) * 3
     try:
-        df = _s2df(rec)
-        mask = (df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)
-        sig_genes = df.loc[mask, "symbol"].map(_clean_sym).tolist()
+        sig_df    = _s2df(sig_rec)
+        sig_genes = sig_df["symbol"].map(_clean_sym).tolist()
 
         drug_df = get_drug_targets(sig_genes)
 
-        # Fallback: if current thresholds give no drug hits, use top-100 up-regulated
+        # Fallback: if sig gives no drug hits, use top-100 up-regulated from full df
         fallback_used = False
+        df = _s2df(full_rec)
         if drug_df.empty and not df.empty:
             top100 = (
                 df[df["log2FC"] > 0]
@@ -1454,24 +1461,18 @@ def cb_drugs(rec, lfc_t, p_t, active_tab):
     Output("bm-store",     "data"),
     Output("cache-bm",     "data", allow_duplicate=True),
     Input("tabs",       "active_tab"),
-    Input("store",      "data"),
+    State("sig-store",  "data"),
     State("data-fp",    "data"),
     State("cache-bm",   "data"),
-    State("lfc-thresh", "value"),
-    State("p-thresh",   "value"),
     prevent_initial_call=True,
 )
-def cb_biomarker(active_tab, rec, fp, cache_fp, lfc_t, p_t):
+def cb_biomarker(active_tab, sig_rec, fp, cache_fp):
     if active_tab != "tab-bm":
         return (dash.no_update,) * 4
     if cache_fp and cache_fp == fp:
         return (dash.no_update,) * 4
-    lfc_t = lfc_t or 1.0
-    p_t   = p_t   or 0.05
     try:
-        df  = _s2df(rec)
-        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
-        bm_src = sig if not sig.empty else df
+        bm_src = _s2df(sig_rec)
         bm_df  = compute_biomarker_score(bm_src)
         fig    = create_biomarker_score_chart(bm_df)
 
@@ -1508,23 +1509,22 @@ def cb_biomarker(active_tab, rec, fp, cache_fp, lfc_t, p_t):
 # ── Auto-Insights tab ─────────────────────────────────────────────────────────
 @app.callback(
     Output("insights-panel", "children"),
-    Input("store",       "data"),
+    Input("sig-store",   "data"),
     Input("enr-store",   "data"),
-    Input("lfc-thresh",  "value"),
-    Input("p-thresh",    "value"),
     Input("tabs",        "active_tab"),
+    State("lfc-thresh",  "value"),
+    State("p-thresh",    "value"),
     prevent_initial_call=True,
 )
-def cb_insights(rec, enr_rec, lfc_t, p_t, active_tab):
+def cb_insights(sig_rec, enr_rec, active_tab, lfc_t, p_t):
     if active_tab != "tab-insights":
         return dash.no_update
     lfc_t = lfc_t or 1.0
     p_t   = p_t   or 0.05
     try:
-        df     = _s2df(rec)
-        sig    = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+        sig    = _s2df(sig_rec)
         enr_df = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
-        insights = generate_insights(sig if not sig.empty else df, enr_df, lfc_t, p_t)
+        insights = generate_insights(sig, enr_df, lfc_t, p_t)
 
         if not insights:
             return html.P("No insights generated yet. Run analyses first.",
