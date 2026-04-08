@@ -76,15 +76,19 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
         sub = df[df["_cat"] == cat]
         if sub.empty:
             continue
+        # customdata[:, 0] = gene symbol (UPPERCASE) — consumed by _genes_from_selected
+        # and passed to the enrichment pipeline as-is.
+        # col-1 kept as baseMean (or 0) so hover template stays consistent.
+        syms      = sub[gene_col].astype(str).str.strip().str.upper().values
         base_vals = sub["baseMean"].values if has_base else np.zeros(len(sub))
-        customdata = np.column_stack([sub[gene_col].values, base_vals])
+        customdata = np.column_stack([syms, base_vals])
         ht = ("<b>%{customdata[0]}</b><br>"
               "Log2FC: %{x:.3f}<br>"
               "−log10(p): %{y:.2f}<br>")
         if has_base:
             ht += "BaseMean: %{customdata[1]:.1f}"
         ht += "<extra></extra>"
-        fig.add_trace(go.Scatter(            # SVG — required for customdata in selectedData
+        fig.add_trace(go.Scattergl(          # WebGL — handles 50 000 points smoothly
             x=sub[logfc_col], y=sub["_nlp"],
             mode="markers", name=cat,
             marker=dict(color=color, size=6, opacity=0.75),
@@ -109,7 +113,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 lambda g: CANCER_GENE_CENSUS.get(g, {}).get("cancer_types", ["?"])[0]
             ).values,
         ])
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=onco_up[logfc_col], y=onco_up["_nlp"],
             mode="markers+text",
             name="Oncogene ↑",
@@ -137,7 +141,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 lambda g: CANCER_GENE_CENSUS.get(g, {}).get("cancer_types", ["?"])[0]
             ).values,
         ])
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=tsg_dn[logfc_col], y=tsg_dn["_nlp"],
             mode="markers+text",
             name="TSG ↓",
@@ -165,7 +169,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
             drug_sig[gene_col].values,
             np.zeros(len(drug_sig)),
         ])
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=drug_sig[logfc_col], y=drug_sig["_nlp"],
             mode="markers",
             name="Drug target",

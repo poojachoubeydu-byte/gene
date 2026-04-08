@@ -381,6 +381,9 @@ def run_gsea_preranked(df: pd.DataFrame) -> dict:
                 rank_metric=lambda d: (
                     np.sign(d["log2FC"])
                     * -np.log10(d[p_col].clip(lower=1e-300))
+                    # Tiny random jitter breaks tied ranks so GSEApy never
+                    # raises "Duplicated values in preranked stats" warnings.
+                    + np.random.default_rng(42).uniform(-1e-9, 1e-9, len(d))
                 )
             )[["symbol", "rank_metric"]]
             .dropna()

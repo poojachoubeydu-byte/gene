@@ -748,8 +748,8 @@ def cb_ingest(contents, fname):
                 "Check that your file has symbol / log2FC / padj columns.",
                 color="warning", dismissable=True,
             )
-        # Trim to essential columns only — keeps memory store lean for 17k+ genes
-        _KEEP = ["symbol", "log2FC", "padj", "pvalue", "baseMean"]
+        # Prune to three columns — mandatory for 50k-gene datasets on 16 GB RAM
+        _KEEP = ["symbol", "log2FC", "padj"]
         df = df[[c for c in _KEEP if c in df.columns]]
         log.info(f"Uploaded {fname}: {len(df)} genes, cols={df.columns.tolist()}")
         return df.to_dict("records"), dbc.Alert(
@@ -1162,7 +1162,7 @@ def cb_crosstalk(records, active_tab):
         import pandas as pd
         from modules.analysis import compute_pathway_crosstalk
         enr = pd.DataFrame(records) if records else pd.DataFrame()
-        ct_df = compute_pathway_crosstalk(enr)
+        ct_df = compute_pathway_crosstalk(enr, top_n=20)
         return create_pathway_crosstalk(ct_df)
     except Exception as e:
         log.error(f"crosstalk: {e}")
@@ -1308,17 +1308,36 @@ def cb_network(active_tab, rec, fp, cache_fp):
         return dash.no_update, dash.no_update, dash.no_update
     try:
         df  = _s2df(rec)
+        # Count candidate genes before the internal max_genes cap so we can warn early
+        n_candidates = len(df)
         res = run_wgcna_lite(df)
         if res.get("error"):
             return blank(res["error"]), res["error"], None
-        G = res["graph"]
-        fig = create_network_graph(res)
-        return (
-            fig,
-            (f"WGCNA-lite  |  {G.number_of_nodes()} nodes  "
-             f"|  {res['n_edges']} edges  |  {res['n_modules']} modules"),
-            fp,
-        )
+        G   = res["graph"]
+
+        # ── Safety valve: > 200 input genes → prune graph to top-100 by degree ──
+        net_warning = None
+        if n_candidates > 200:
+            import networkx as nx
+            degree_map = dict(G.degree())
+            top100     = sorted(degree_map, key=degree_map.get, reverse=True)[:100]
+            G_pruned   = G.subgraph(top100).copy()
+            res        = {**res, "graph": G_pruned,
+                          "n_edges": G_pruned.number_of_edges()}
+            G          = G_pruned
+            net_warning = dbc.Alert(
+                f"⚠️ {n_candidates:,} genes in dataset — displaying top 100 "
+                "high-degree nodes to prevent browser slowdown. "
+                "Upload a pre-filtered significant-gene list for the full network.",
+                color="warning", className="py-1 px-2 mb-1 small",
+            )
+
+        fig      = create_network_graph(res)
+        info_txt = (f"WGCNA-lite  |  {G.number_of_nodes()} nodes  "
+                    f"|  {res['n_edges']} edges  |  {res['n_modules']} modules")
+        info_div = html.Div([net_warning, html.Small(info_txt, className="text-muted")]
+                            if net_warning else html.Small(info_txt, className="text-muted"))
+        return fig, info_div, fp
     except Exception as e:
         log.error(f"network: {e}")
         return blank(str(e)), str(e), None
