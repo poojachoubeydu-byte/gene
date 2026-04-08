@@ -67,7 +67,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 # ── Background-callback manager (diskcache — no Redis/Celery needed) ──────────
-_bg_cache  = diskcache.Cache("./cache")
+_bg_cache  = diskcache.Cache("/tmp/apex_bg_cache")   # /tmp is writable in all containers
 _bg_manager = DiskcacheManager(_bg_cache)
 
 
