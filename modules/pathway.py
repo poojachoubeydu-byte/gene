@@ -198,10 +198,14 @@ def _run_enrichment(
             continue
 
         # 2×2 contingency table
+        # background must be >= a+b+c so that d (genes in neither set) is ≥ 0.
+        # If the caller passes a background smaller than the combined set sizes
+        # (e.g. a 30-gene demo dataset), clamp it up to avoid a degenerate table.
         a = n_over
         b = len(pw_set) - n_over
         c = len(gene_set) - n_over
-        d = max(0, background - a - b - c)
+        safe_bg = max(background, a + b + c + 1)
+        d = safe_bg - a - b - c        # guaranteed ≥ 1
 
         _, p = fisher_exact([[a, b], [c, d]], alternative="greater")
 

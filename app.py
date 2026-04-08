@@ -166,8 +166,9 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
         cols = df.columns.tolist()
         df   = df.rename(columns={cols[0]: "symbol", cols[1]: "log2FC", cols[2]: "padj"})
 
-    # If the symbol column contains numeric values (e.g. Entrez IDs), find the
-    # first object-dtype column with short string values and use that instead.
+    # ── Numeric-dtype Entrez column: swap with the first string column ────────
+    # Handles the case where the CSV has an integer Entrez-ID column that pandas
+    # reads as int64 (e.g. a DESeq2 output with row names as Entrez IDs).
     _reserved = {"log2FC", "padj", "pvalue", "baseMean"}
     if not pd.api.types.is_object_dtype(df["symbol"]):
         for c in df.columns:
@@ -176,7 +177,6 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
                 break
 
     # Always cast symbol to string so .str accessor never fails downstream
-    # _clean_sym: strip whitespace + quotes + uppercase — ensures KEGG/GSEA/Drug DB matches
     df["symbol"] = df["symbol"].map(_clean_sym)
 
     df["log2FC"] = pd.to_numeric(df["log2FC"], errors="coerce")
@@ -184,8 +184,27 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
     # filtering). Coerce those to 1.0 (non-significant) so NO genes are dropped.
     padj_raw = pd.to_numeric(df["padj"], errors="coerce")
     df["padj"] = padj_raw.fillna(1.0).clip(lower=1e-300, upper=1.0)
-    # Only drop rows where log2FC is truly missing (all-zero-count genes, uninformative)
-    return df.dropna(subset=["log2FC"]).reset_index(drop=True)
+    df = df.dropna(subset=["log2FC"]).reset_index(drop=True)
+
+    # ── ID-type detection + translation (string Entrez / Ensembl IDs) ─────────
+    # String Entrez IDs like "7157" have object dtype — the dtype check above
+    # does NOT catch them.  Detect by content and translate to HGNC symbols so
+    # every downstream enrichment DB lookup finds a match.
+    try:
+        from modules.id_mapper import detect_id_type, translate_to_symbols
+        sym_vals = df["symbol"].tolist()
+        _id_type = detect_id_type(sym_vals)
+        if _id_type in ("entrez", "ensembl"):
+            log.info(f"_normalise: detected {_id_type} IDs — running translation")
+            unique_ids  = list(dict.fromkeys(sym_vals))          # preserve order, deduplicate
+            trans_list, _, n_in, n_ok = translate_to_symbols(unique_ids)
+            trans_map   = dict(zip(unique_ids, trans_list))
+            df["symbol"] = df["symbol"].map(trans_map).fillna(df["symbol"])
+            log.info(f"_normalise: translated {n_ok}/{n_in} {_id_type} IDs → gene symbols")
+    except Exception as _te:
+        log.warning(f"_normalise: ID translation skipped — {_te}")
+
+    return df
 
 
 def _load_demo() -> pd.DataFrame:
@@ -248,10 +267,42 @@ def _run_enrichment(
     """
     if not sig_genes:
         return pd.DataFrame()
-    # Normalise symbols with global cleaner before any DB lookup
+
+    # ── Normalise symbols ────────────────────────────────────────────────────
     sig_genes = [_clean_sym(g) for g in sig_genes if g and str(g).strip()]
     if not sig_genes:
         return pd.DataFrame()
+
+    # ── ID translation safety net ────────────────────────────────────────────
+    # Catches Entrez / Ensembl IDs that were not translated at upload time
+    # (e.g. genes selected via lasso from a dataset that bypassed _normalise).
+    id_type      = "symbol"
+    n_translated = 0
+    try:
+        from modules.id_mapper import detect_id_type, translate_to_symbols
+        id_type = detect_id_type(sig_genes)
+        if id_type in ("entrez", "ensembl"):
+            trans_list, id_type, n_in, n_translated = translate_to_symbols(sig_genes)
+            if n_translated > 0:
+                # Also re-key lfc/nlp maps so directional scoring works
+                _trans_map   = dict(zip(sig_genes, trans_list))
+                gene_lfc_map = {_trans_map.get(k, k): v
+                                for k, v in (gene_lfc_map or {}).items()}
+                gene_nlp_map = {_trans_map.get(k, k): v
+                                for k, v in (gene_nlp_map or {}).items()}
+                sig_genes    = trans_list
+                log.info(f"_run_enrichment: translated {n_translated}/{n_in} "
+                         f"{id_type} IDs → symbols")
+    except Exception as _te:
+        log.warning(f"_run_enrichment: ID translation skipped — {_te}")
+
+    # ── Background floor ─────────────────────────────────────────────────────
+    # Fisher's 2×2 table requires  background >= query_size + max_pathway_size.
+    # If the uploaded dataset is tiny (demo / test), clamp to a safe minimum so
+    # cell d never goes negative and the p-value is meaningful.
+    MAX_PATHWAY_SIZE = 20          # largest gene set in the built-in databases
+    background = max(background, len(sig_genes) + MAX_PATHWAY_SIZE, 500)
+
     try:
         analyzer = _get_analyzer(db_choice)
         lfc_map  = gene_lfc_map or {}
@@ -266,17 +317,34 @@ def _run_enrichment(
             result = analyzer.run_multi_enrichment(sig_genes, strict=strict, **_kwargs)
             # Auto-retry: never leave user with blank — silently relax if strict gave nothing
             if result.empty and strict:
-                log.info("Enrichment: strict mode returned 0 rows — auto-retrying with relaxed threshold")
+                log.info("Enrichment: strict mode 0 rows — retrying relaxed")
                 result = analyzer.run_multi_enrichment(sig_genes, strict=False, **_kwargs)
                 if not result.empty:
                     result["_mode"] = "relaxed"
         else:
             result = analyzer.run_enrichment(sig_genes, strict=strict, **_kwargs)
             if result.empty and strict:
-                log.info("Enrichment: strict mode returned 0 rows — auto-retrying with relaxed threshold")
+                log.info("Enrichment: strict mode 0 rows — retrying relaxed")
                 result = analyzer.run_enrichment(sig_genes, strict=False, **_kwargs)
                 if not result.empty:
                     result["_mode"] = "relaxed"
+
+        # ── Tag result with translation metadata so the UI can show alerts ──
+        if not result.empty and id_type in ("entrez", "ensembl"):
+            result["_id_type"]      = id_type
+            result["_n_translated"] = n_translated
+        elif result.empty and id_type in ("entrez", "ensembl"):
+            # Even an empty DF needs the tag for the warning alert
+            result = pd.DataFrame([{
+                "_id_type": id_type, "_n_translated": n_translated,
+            }])
+            result = result.iloc[0:0]  # keep columns, drop the dummy row
+            result["_id_type"]      = pd.Series(dtype=str)
+            result["_n_translated"] = pd.Series(dtype=int)
+            # Store in attrs — survives the empty-frame path
+            result.attrs["_id_type"]      = id_type
+            result.attrs["_n_translated"] = n_translated
+
         return result
     except Exception as e:
         log.warning(f"Enrichment ({db_choice}): {e}")
@@ -970,6 +1038,16 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, relayout, active_tab):
             background=background, strict=strict,
         )
 
+        # ── Pull translation metadata from result ─────────────────────────
+        enr_id_type      = enr.attrs.get("_id_type", "symbol")
+        enr_n_translated = enr.attrs.get("_n_translated", 0)
+        if "_id_type" in (enr.columns if not enr.empty else []):
+            enr_id_type      = enr["_id_type"].iloc[0]  if len(enr) else enr_id_type
+            enr_n_translated = enr["_n_translated"].iloc[0] if len(enr) else enr_n_translated
+            # Drop internal columns before rendering
+            enr = enr.drop(columns=[c for c in ["_id_type","_n_translated"]
+                                    if c in enr.columns])
+
         # ── Status bar ───────────────────────────────────────────────────
         mode_label  = "Relaxed (nominal p)" if not strict else "Strict (FDR adj.)"
         auto_relaxed = (not enr.empty and enr.get("_mode", pd.Series()).eq("relaxed").any()
@@ -981,11 +1059,30 @@ def cb_volcano_enr(rec, lfc_t, p_t, db, enr_mode, sel, relayout, active_tab):
             f"· {len(genes):,} genes  · {mode_label}"
             + ("  · ⚡ auto-relaxed" if auto_relaxed else "")
         ) if n_paths > 0 else (
-            f"⚠️ No pathways found for {len(genes):,} genes "
-            f"({mode_label}) — try Relaxed mode or narrow your selection"
+            f"⚠️ No pathways found for {len(genes):,} genes ({mode_label})"
         )
-        enr_status = dbc.Alert(status_msg, color=status_color,
-                               className="py-1 px-2 mb-0 small")
+        enr_status_alerts = [
+            dbc.Alert(status_msg, color=status_color, className="py-1 px-2 mb-1 small"),
+        ]
+
+        # Numeric-ID conversion notice
+        if enr_id_type in ("entrez", "ensembl"):
+            id_label = "Entrez" if enr_id_type == "entrez" else "Ensembl"
+            enr_status_alerts.append(dbc.Alert(
+                f"⚠️ {id_label} IDs detected in selection — "
+                f"auto-converted {enr_n_translated:,} IDs to gene symbols for analysis.",
+                color="warning", className="py-1 px-2 mb-1 small",
+            ))
+
+        # Relaxed-mode suggestion when strict found nothing
+        if n_paths == 0 and strict:
+            enr_status_alerts.append(dbc.Alert(
+                "💡 Tip: switch to Nominal P-value (Relaxed) mode in the sidebar "
+                "to surface emerging trends that don't yet survive FDR correction.",
+                color="info", className="py-1 px-2 mb-0 small",
+            ))
+
+        enr_status = html.Div(enr_status_alerts)
 
         # ── Large-selection warning ───────────────────────────────────────
         TOO_LARGE  = 2000
