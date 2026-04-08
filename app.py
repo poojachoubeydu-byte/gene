@@ -842,11 +842,16 @@ def cb_banner(rec, lfc_t, p_t):
     Output("meta-bar", "figure"),
     Output("meta-table", "children"),
     Input("store", "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh",   "value"),
 )
-def cb_meta(rec):
+def cb_meta(rec, lfc_t, p_t):
+    lfc_t = lfc_t or 1.0
+    p_t   = p_t   or 0.05
     try:
-        df     = _s2df(rec)
-        scored = compute_meta_score(df)
+        df   = _s2df(rec)
+        sig  = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+        scored = compute_meta_score(sig if not sig.empty else df)
         fig    = create_meta_score_bar(scored)
         filt   = scored[~scored["symbol"].isin(HOUSEKEEP)].sort_values(
             "meta_score", ascending=False
@@ -1242,16 +1247,21 @@ def cb_advanced(rec, lfc_t, p_t, active_tab):
     Input("store", "data"),
     State("data-fp",    "data"),
     State("cache-gsea", "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh",   "value"),
     prevent_initial_call=True,
 )
-def cb_gsea(active_tab, rec, fp, cache_fp):
+def cb_gsea(active_tab, rec, fp, cache_fp, lfc_t, p_t):
     if active_tab != "tab-gsea":
         return dash.no_update, dash.no_update, dash.no_update
     if cache_fp and cache_fp == fp:
         return dash.no_update, dash.no_update, dash.no_update
+    lfc_t = lfc_t or 1.0
+    p_t   = p_t   or 0.05
     try:
         df  = _s2df(rec)
-        res = run_gsea_preranked(df)
+        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+        res = run_gsea_preranked(sig if not sig.empty else df)
         if res.get("error"):
             return blank(f"GSEA: {res['error']}"), html.P(res["error"], className="text-muted small"), None
         results = res["results"]
@@ -1299,18 +1309,25 @@ def cb_gsea(active_tab, rec, fp, cache_fp):
     Input("store", "data"),
     State("data-fp",   "data"),
     State("cache-net", "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh",   "value"),
     prevent_initial_call=True,
 )
-def cb_network(active_tab, rec, fp, cache_fp):
+def cb_network(active_tab, rec, fp, cache_fp, lfc_t, p_t):
     if active_tab != "tab-net":
         return dash.no_update, dash.no_update, dash.no_update
     if cache_fp and cache_fp == fp:
         return dash.no_update, dash.no_update, dash.no_update
+    lfc_t = lfc_t or 1.0
+    p_t   = p_t   or 0.05
     try:
         df  = _s2df(rec)
+        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+        # Use significant genes (hard cap 200); fall back to full df if none
+        net_df = sig if not sig.empty else df
         # Count candidate genes before the internal max_genes cap so we can warn early
-        n_candidates = len(df)
-        res = run_wgcna_lite(df)
+        n_candidates = len(net_df)
+        res = run_wgcna_lite(net_df)
         if res.get("error"):
             return blank(res["error"]), res["error"], None
         G   = res["graph"]

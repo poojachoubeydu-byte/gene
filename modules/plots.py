@@ -636,31 +636,123 @@ def create_rank_metric(df: pd.DataFrame) -> go.Figure:
 
 
 def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
-                       p_t: float = 0.05, top_n: int = 30) -> go.Figure:
+                       p_t: float = 0.05, top_n: int = 100) -> go.Figure:
+    """
+    Sample Expression Heatmap — Top 100 genes by meta-score.
+
+    Since aggregate-only CSVs carry no per-sample counts, six pseudo-samples
+    are generated from log2FC so the heatmap conveys fold-change direction and
+    magnitude across a simulated two-group design:
+
+        Group A (control, 3 replicates) : expression ≈ −log2FC/2 + N(0, 0.25)
+        Group B (treatment, 3 replicates): expression ≈ +log2FC/2 + N(0, 0.25)
+
+    Values are clipped to [−6, +6] matching the RdBu colorscale limits.
+    When real sample columns are present in df they are used directly.
+    """
     HOUSE = {"ACTB", "GAPDH", "B2M", "RPLP0", "HPRT1", "GUSB", "TBP"}
+
+    df = df.copy()
+
+    # ── Rank by composite meta-score: |LFC| × −log10(padj) ──────────────────
+    df["_score"] = (df["log2FC"].abs()
+                    * -np.log10(df["padj"].clip(lower=1e-300)))
     sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
-    if sig.empty:
-        sig = df
-    sig = sig[~sig["symbol"].isin(HOUSE)]
-    top = pd.concat([
-        sig.nlargest(top_n, "log2FC"),
-        sig.nsmallest(top_n // 2, "log2FC"),
-    ]).drop_duplicates("symbol")
-    z = np.column_stack([-np.log10(top["padj"]), top["log2FC"]])
+    pool = sig if not sig.empty else df
+    pool = pool[~pool["symbol"].isin(HOUSE)]
+    top  = pool.nlargest(min(top_n, len(pool)), "_score").reset_index(drop=True)
+
+    if top.empty:
+        return blank("No genes pass the significance threshold for the heatmap.")
+
+    # ── Detect real sample columns vs aggregate-only input ───────────────────
+    reserved = {"symbol", "log2FC", "padj", "pvalue", "baseMean",
+                "_score", "_cat", "_nlp"}
+    sample_cols = [c for c in df.columns if c not in reserved
+                   and pd.api.types.is_numeric_dtype(df[c])]
+
+    rng = np.random.default_rng(42)   # reproducible noise
+
+    if sample_cols:
+        # Real per-sample expression data present — use it directly
+        z = top[sample_cols].values.clip(-6, 6)
+        col_labels = sample_cols
+        n_a = len(sample_cols) // 2
+    else:
+        # Generate 6 pseudo-samples: 3 Group A + 3 Group B
+        lfc_arr = top["log2FC"].values
+        noise   = rng.normal(0, 0.25, (len(top), 6))
+        half    = lfc_arr[:, None] / 2
+        z = np.hstack([-half + noise[:, :3],
+                        half + noise[:, 3:]]).clip(-6, 6)
+        col_labels = ["A_rep1", "A_rep2", "A_rep3",
+                      "B_rep1", "B_rep2", "B_rep3"]
+        n_a = 3
+
+    gene_labels = top["symbol"].tolist()
+
     fig = go.Figure(go.Heatmap(
-        z=z.T,
-        x=top["symbol"].tolist(),
-        y=["-log10(p)", "Log2FC"],
-        colorscale="RdBu", reversescale=True, zmid=0,
+        z=z,
+        x=col_labels,
+        y=gene_labels,
+        colorscale="RdBu",
+        reversescale=True,
+        zmid=0, zmin=-6, zmax=6,
         zsmooth="fast",
-        hovertemplate="Gene: %{x}<br>Metric: %{y}<br>Value: %{z:.3f}<extra></extra>",
-        colorbar=dict(title="Value", thickness=12),
+        hovertemplate=(
+            "Gene: <b>%{y}</b><br>Sample: %{x}<br>"
+            "Expression: %{z:.2f}<extra></extra>"
+        ),
+        colorbar=dict(
+            title="Log2 Expr",
+            thickness=12,
+            tickvals=[-6, -3, 0, 3, 6],
+        ),
     ))
+
+    # ── Colored group-header blocks (shapes + annotations in paper coords) ───
+    n_cols = len(col_labels)
+    # x positions in "x" axis domain: -0.5 … n_cols-0.5
+    x_a_start, x_a_end = -0.5, n_a - 0.5
+    x_b_start, x_b_end = n_a - 0.5, n_cols - 0.5
+
+    for x0, x1, color, label in [
+        (x_a_start, x_a_end, "rgba(39,174,96,0.25)",  "Group A"),
+        (x_b_start, x_b_end, "rgba(142,68,173,0.25)", "Group B"),
+    ]:
+        fig.add_shape(
+            type="rect",
+            xref="x", yref="paper",
+            x0=x0, x1=x1, y0=1.0, y1=1.06,
+            fillcolor=color, line_width=0,
+        )
+        fig.add_annotation(
+            xref="x", yref="paper",
+            x=(x0 + x1) / 2, y=1.03,
+            text=f"<b>{label}</b>",
+            showarrow=False,
+            font=dict(size=10,
+                      color="#1e8449" if label == "Group A" else "#6c3483"),
+        )
+
     fig.update_layout(
         template="simple_white",
-        title=f"Top {len(top)} DE Genes — Heatmap",
-        xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
-        height=320, margin=dict(l=80, r=10, t=45, b=80),
+        title=dict(
+            text=(f"Sample Expression Heatmap — Top {len(top)} Genes "
+                  f"<span style='font-size:10px;color:#888;'>"
+                  f"(ranked by |LFC|×−log10p)"
+                  + (" · pseudo-samples" if not sample_cols else "")
+                  + "</span>"),
+            font=dict(size=13),
+        ),
+        xaxis=dict(tickangle=-45, tickfont=dict(size=9), side="bottom"),
+        yaxis=dict(
+            tickfont=dict(size=8),
+            autorange="reversed",
+            dtick=max(1, len(top) // 20),   # avoid label overlap for 100 genes
+        ),
+        height=max(340, min(900, len(top) * 8 + 100)),
+        margin=dict(l=80, r=20, t=70, b=60),
     )
     return fig
 
