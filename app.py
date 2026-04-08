@@ -1956,14 +1956,19 @@ def dl_bm_csv(n, rec):
     Output("sidebar-ai-badge",  "children", allow_duplicate=True),
     Input("tabs",             "active_tab"),
     Input("refresh-tab-btn",  "n_clicks"),
-    State("sig-store", "data"),
-    State("enr-store", "data"),
-    State("store",     "data"),
-    State("bm-store",  "data"),
+    State("sig-store",   "data"),
+    State("enr-store",   "data"),
+    State("store",       "data"),
+    State("bm-store",    "data"),
+    State("lfc-thresh",  "value"),
+    State("p-thresh",    "value"),
+    State("pathway-db",  "value"),
     prevent_initial_call=True,
 )
-def cb_ai_summary(active_tab, _refresh_clicks, sig_rec, enr_rec, full_rec, bm_rec):
-    from modules.ai_summary import get_biological_story
+def cb_ai_summary(active_tab, _refresh_clicks,
+                  sig_rec, enr_rec, full_rec, bm_rec,
+                  lfc_thresh, p_thresh, pathway_db):
+    from modules.ai_summary import get_biological_story_cached
 
     sig_df  = _s2df(sig_rec)
     enr_df  = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
@@ -2081,26 +2086,45 @@ def cb_ai_summary(active_tab, _refresh_clicks, sig_rec, enr_rec, full_rec, bm_re
         "jaccard_pairs": jaccard_pairs,   # Deep Scanning gene-overlap context
     }
 
+    # ── Determine whether this is a forced refresh ────────────────────────────
+    force_refresh = (ctx.triggered_id == "refresh-tab-btn")
+
     try:
-        summary, powered_by = get_biological_story(context_data, active_tab=active_tab)
+        summary, powered_by, from_cache = get_biological_story_cached(
+            context_data,
+            lfc_thresh  = float(lfc_thresh  or 1.0),
+            p_thresh    = float(p_thresh    or 0.05),
+            pathway_db  = str(pathway_db   or "all"),
+            force_refresh = force_refresh,
+            active_tab  = active_tab,
+        )
     except Exception as exc:
         log.error(f"cb_ai_summary: {exc}")
-        summary    = f"AI interpretation unavailable: {exc}"
-        powered_by = ""
+        summary, powered_by, from_cache = (
+            f"AI interpretation unavailable: {exc}", "", False,
+        )
 
     # ── Badge always reflects KEY AVAILABILITY, not last call result ──────────
-    # This means a transient API failure never flips the badge to "Offline".
     from modules.ai_summary import check_available_model
     badge_label, badge_color = check_available_model()
-    badge  = dbc.Badge(badge_label, color=badge_color, style={"fontSize": 9})
+    badge = dbc.Badge(badge_label, color=badge_color, style={"fontSize": 9})
 
-    # Status line shows which model actually generated this response
+    # ── Status line: model + optional cache note ──────────────────────────────
+    status_parts = []
     if powered_by and "Rule" not in powered_by and "Offline" not in powered_by:
-        status = html.Span(["⚡ Powered by ", html.B(powered_by)])
+        status_parts.append(html.Span(["⚡ Powered by ", html.B(powered_by)]))
     elif powered_by:
-        status = html.Span(powered_by, className="text-muted")
-    else:
-        status = html.Span("")
+        status_parts.append(html.Span(powered_by, className="text-muted"))
+
+    if from_cache:
+        status_parts.append(
+            html.Span(
+                " · 📦 Retrieved from local cache (24 h TTL)",
+                style={"fontSize": 9, "color": "#888", "marginLeft": 4},
+            )
+        )
+
+    status = html.Span(status_parts) if status_parts else html.Span("")
 
     return (
         dcc.Markdown(summary, style={"fontSize": 11, "lineHeight": "1.65"}),

@@ -11,10 +11,65 @@ API keys (set in .env file):
     GROQ_API_KEY       — https://console.groq.com              (free, no card)
 """
 
+import hashlib
 import logging
 import os
+import time
 
 log = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Server-side AI response cache — keyed by (genes, lfc, pval, db)
+# TTL = 24 hours.  Thread-safe enough for single-process Dash / Gunicorn
+# because Python's GIL protects dict reads/writes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CACHE_TTL: int = 24 * 3600                          # seconds
+_AI_CACHE:  dict[str, tuple[float, str, str]] = {}   # key → (ts, summary, powered_by)
+
+
+def _make_cache_key(
+    top_genes: list[dict],
+    lfc_thresh: float,
+    p_thresh: float,
+    pathway_db: str,
+) -> str:
+    """Return a stable SHA-256 hex key for the given query parameters."""
+    gene_part  = ",".join(sorted(g["symbol"].upper() for g in top_genes))
+    raw        = f"{gene_part}|{round(lfc_thresh, 3)}|{round(p_thresh, 5)}|{pathway_db or 'all'}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cache_get(key: str) -> tuple[str, str] | None:
+    """Return (summary, powered_by) if cached and not expired, else None."""
+    entry = _AI_CACHE.get(key)
+    if entry is None:
+        return None
+    ts, summary, powered_by = entry
+    if time.time() - ts > _CACHE_TTL:
+        del _AI_CACHE[key]
+        return None
+    return summary, powered_by
+
+
+def _cache_set(key: str, summary: str, powered_by: str) -> None:
+    _AI_CACHE[key] = (time.time(), summary, powered_by)
+
+
+def invalidate_cache_key(key: str) -> None:
+    """Remove a single entry — called when the user forces a Refresh."""
+    _AI_CACHE.pop(key, None)
+
+
+def cache_stats() -> dict:
+    """Diagnostic helper — returns count and oldest/newest timestamps."""
+    now = time.time()
+    live = {k: v for k, v in _AI_CACHE.items() if now - v[0] <= _CACHE_TTL}
+    return {
+        "live_entries": len(live),
+        "total_entries": len(_AI_CACHE),
+        "ttl_hours": _CACHE_TTL / 3600,
+    }
 
 # ── Shared system prompt ──────────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
@@ -236,3 +291,49 @@ def get_biological_story(context_data: dict, **kwargs) -> tuple[str, str]:
     print("[AI Copilot] Falling back to Rule-Based")
     log.info("AI summary: using rule-based fallback")
     return _rule_based_summary(context_data), "Rule-Based · Offline"
+
+
+def get_biological_story_cached(
+    context_data: dict,
+    lfc_thresh: float = 1.0,
+    p_thresh: float = 0.05,
+    pathway_db: str = "all",
+    force_refresh: bool = False,
+    **kwargs,
+) -> tuple[str, str, bool]:
+    """
+    Cache-aware wrapper around get_biological_story.
+
+    Parameters
+    ----------
+    context_data  : same dict accepted by get_biological_story
+    lfc_thresh    : |Log2FC| cutoff used to build sig-store
+    p_thresh      : adjusted p-value cutoff used to build sig-store
+    pathway_db    : pathway database selection ('all', 'kegg', 'go', …)
+    force_refresh : when True the cached entry is discarded and a fresh
+                    API call is made regardless of TTL
+
+    Returns
+    -------
+    (summary, powered_by, from_cache)
+        from_cache — True when the result was served from the local cache
+    """
+    top_genes = context_data.get("top_genes", [])
+    key       = _make_cache_key(top_genes, lfc_thresh, p_thresh, pathway_db)
+
+    if force_refresh:
+        invalidate_cache_key(key)
+        log.info(f"AI cache: force-refresh — key {key[:12]}… evicted")
+    else:
+        cached = _cache_get(key)
+        if cached is not None:
+            log.info(f"AI cache: HIT — key {key[:12]}…")
+            print(f"[AI Copilot] Cache HIT — serving from local cache (key {key[:12]}…)")
+            summary, powered_by = cached
+            return summary, powered_by, True
+
+    log.info(f"AI cache: MISS — calling live API (key {key[:12]}…)")
+    print(f"[AI Copilot] Cache MISS — calling live API (key {key[:12]}…)")
+    summary, powered_by = get_biological_story(context_data, **kwargs)
+    _cache_set(key, summary, powered_by)
+    return summary, powered_by, False
