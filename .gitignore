@@ -57,3 +57,4 @@ logs/
 
 # HuggingFace build artifacts
 flagged/
+.aider*

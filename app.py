@@ -31,11 +31,11 @@ except ImportError:
     pass  # python-dotenv not installed; rely on environment variables directly
 
 # ── Startup key check — visible in terminal before Dash server starts ─────────
-_groq_key   = os.environ.get("GROQ_API_KEY",   "").strip()
 _gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+_groq_key   = os.environ.get("GROQ_API_KEY",   "").strip()
 print("=" * 55)
-print(f"[Apex AI]  GROQ_API_KEY   : {'✅ Detected' if _groq_key   else '❌ Missing'}")
-print(f"[Apex AI]  GEMINI_API_KEY : {'✅ Detected' if _gemini_key else '❌ Missing (fallback)'}")
+print(f"[Apex AI]  GEMINI_API_KEY : {'✅ Detected (primary)' if _gemini_key else '❌ Missing'}")
+print(f"[Apex AI]  GROQ_API_KEY   : {'✅ Detected (fallback)' if _groq_key   else '❌ Missing'}")
 print("=" * 55)
 
 import dash
@@ -489,8 +489,13 @@ SIDEBAR = dbc.Col([
         html.Hr(className="my-2"),
         dbc.Button("🔄 Refresh Current Tab", id="refresh-tab-btn",
                    color="warning", outline=True, size="sm", className="w-100 mb-2"),
-        dbc.Tooltip("Re-run analysis for the active tab even if results are cached",
-                    target="refresh-tab-btn", placement="right"),
+        dbc.Tooltip(
+            "Re-runs analysis for the active tab and re-reads your .env file "
+            "so new API keys are picked up without restarting the server.",
+            target="refresh-tab-btn", placement="right",
+        ),
+        # ── Key-missing warning (populated by cb_key_status on load/refresh) ──
+        html.Div(id="key-warning-alert"),
 
         html.Hr(className="my-2"),
         dbc.Button("📥 Download PDF Report", id="btn-pdf",
@@ -888,23 +893,77 @@ def cb_sig_store(rec, lfc_t, p_t):
     prevent_initial_call=True,
 )
 def cb_refresh_tabs(_):
+    # Re-read .env so any newly added API keys are picked up without restarting.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except ImportError:
+        pass
     # Clearing enr-store forces enrichment to re-run on the Volcano tab.
     # Clearing all cache fingerprints forces lazy-tab analyses to re-run.
     return None, None, None, None, []
 
 
-# ── Startup key check: sets AI badge immediately on page load ─────────────────
-# Fires once after 800 ms via dcc.Interval so the badge shows the correct
-# model name even before the user switches a tab.
+# ── Startup key check: sets AI badge + key-warning alert on load / refresh ────
 @app.callback(
-    Output("sidebar-ai-badge", "children", allow_duplicate=True),
+    Output("sidebar-ai-badge",  "children", allow_duplicate=True),
+    Output("key-warning-alert", "children"),
     Input("key-check-interval", "n_intervals"),
+    Input("refresh-tab-btn",    "n_clicks"),
     prevent_initial_call=True,
 )
-def cb_key_status(_):
+def cb_key_status(_interval, _refresh):
+    # Re-read .env every time this fires so new keys are picked up immediately.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except ImportError:
+        pass
+
     from modules.ai_summary import check_available_model
     label, color = check_available_model()
-    return dbc.Badge(label, color=color, style={"fontSize": 9})
+    badge = dbc.Badge(label, color=color, style={"fontSize": 9})
+
+    # Warn when no key at all is present (Gemini is primary, Groq is fallback)
+    gemini_set = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+    groq_set   = bool(os.environ.get("GROQ_API_KEY",   "").strip())
+
+    if not gemini_set and not groq_set:
+        warn = dbc.Alert(
+            [
+                html.Strong("⚠️ API Keys Missing"),
+                html.Br(),
+                html.Small(
+                    "Add GEMINI_API_KEY (primary) or GROQ_API_KEY (fallback) "
+                    "to your .env file, then click Refresh — no server restart needed.",
+                    className="text-muted",
+                ),
+                html.Br(),
+                html.Small(
+                    [
+                        "Get a free Gemini key: ",
+                        html.A("aistudio.google.com", href="#",
+                               style={"pointerEvents": "none", "color": "inherit"}),
+                    ],
+                    className="text-muted",
+                ),
+            ],
+            color="danger", className="py-1 px-2 mt-1 small",
+        )
+    elif not gemini_set:
+        # Groq present but Gemini (primary) missing — soft notice only
+        warn = dbc.Alert(
+            html.Small(
+                "💡 Add GEMINI_API_KEY for Gemini 2.5 Flash (primary AI). "
+                "Currently using Groq as fallback.",
+                className="text-muted",
+            ),
+            color="info", className="py-1 px-2 mt-1 small",
+        )
+    else:
+        warn = None
+
+    return badge, warn
 
 
 # ── Summary banner ────────────────────────────────────────────────────────────
@@ -1671,24 +1730,41 @@ def cb_gene(gene):
 
 # ── PDF download (publishable quality — v3.8) ────────────────────────────────
 @app.callback(
-    Output("dl-pdf",    "data"),
-    Input("btn-pdf",    "n_clicks"),
-    State("volcano",    "figure"),
-    State("pca",        "figure"),
-    State("bubble",     "figure"),
-    State("path-bar",   "figure"),
-    State("crosstalk",  "figure"),
-    State("heatmap",    "figure"),
-    State("enr-store",  "data"),
-    State("bm-store",   "data"),
-    State("store",      "data"),
-    State("lfc-thresh", "value"),
-    State("p-thresh",   "value"),
-    State("sig-store",  "data"),
+    Output("dl-pdf",       "data"),
+    Input("btn-pdf",       "n_clicks"),
+    State("volcano",       "figure"),
+    State("pca",           "figure"),
+    State("bubble",        "figure"),
+    State("path-bar",      "figure"),
+    State("crosstalk",     "figure"),
+    State("heatmap",       "figure"),
+    # Additional graphs for full deep-scan PDF
+    State("ma-plot",       "figure"),
+    State("pval-hist",     "figure"),
+    State("lfc-dist",      "figure"),
+    State("rank-plot",     "figure"),
+    State("gsea-bar",      "figure"),
+    State("network",       "figure"),
+    State("drug-scatter",  "figure"),
+    State("drug-donut",    "figure"),
+    State("bm-chart",      "figure"),
+    State("meta-bar",      "figure"),
+    State("enr-store",     "data"),
+    State("bm-store",      "data"),
+    State("store",         "data"),
+    State("lfc-thresh",    "value"),
+    State("p-thresh",      "value"),
+    State("sig-store",     "data"),
+    # ── Raw session-state extras for Deep Scan data tables ────────────────────
+    State("pca-info",      "children"),   # PCA variance % text
+    State("gene-input",    "value"),      # Gene Bio-Context query string
     prevent_initial_call=True,
 )
 def cb_pdf(n, vol, pca_f, bubble_f, bar_f, crosstalk_f, heatmap_f,
-           enr_recs, bm_recs, data_recs, lfc_t, p_t, sig_recs):
+           ma_f, pval_f, lfc_dist_f, rank_f, gsea_f, net_f,
+           drug_scatter_f, drug_donut_f, bm_f, meta_bar_f,
+           enr_recs, bm_recs, data_recs, lfc_t, p_t, sig_recs,
+           pca_info, gene_query):
     if not n:
         return dash.no_update
     try:
@@ -1761,17 +1837,35 @@ def cb_pdf(n, vol, pca_f, bubble_f, bar_f, crosstalk_f, heatmap_f,
         except Exception as ai_exc:
             log.warning(f"pdf ai discussion: {ai_exc}")
 
+        def _fig(f):
+            return go.Figure(f) if f else None
+
+        bm_df = pd.DataFrame(bm_recs or [])
+
         pdf = generate_pdf_report(
-            go.Figure(vol)         if vol         else None,
+            _fig(vol),
             enr_df,
-            go.Figure(pca_f)       if pca_f       else None,
+            _fig(pca_f),
             drug_df=drug_df,
             insights=insights,
             summary_stats=stats,
-            bubble_fig=go.Figure(bubble_f)     if bubble_f     else None,
-            bar_fig=go.Figure(bar_f)           if bar_f        else None,
-            crosstalk_fig=go.Figure(crosstalk_f) if crosstalk_f else None,
-            heatmap_fig=go.Figure(heatmap_f)   if heatmap_f    else None,
+            bubble_fig=_fig(bubble_f),
+            bar_fig=_fig(bar_f),
+            crosstalk_fig=_fig(crosstalk_f),
+            heatmap_fig=_fig(heatmap_f),
+            ma_fig=_fig(ma_f),
+            pval_fig=_fig(pval_f),
+            lfc_dist_fig=_fig(lfc_dist_f),
+            rank_fig=_fig(rank_f),
+            gsea_fig=_fig(gsea_f),
+            network_fig=_fig(net_f),
+            drug_scatter_fig=_fig(drug_scatter_f),
+            drug_donut_fig=_fig(drug_donut_f),
+            bm_fig=_fig(bm_f),
+            meta_bar_fig=_fig(meta_bar_f),
+            bm_df=bm_df,
+            pca_variance_text=pca_info if isinstance(pca_info, str) else None,
+            gene_query=gene_query or None,
             ai_discussion=ai_discussion,
             powered_by=ai_powered_by,
         )
