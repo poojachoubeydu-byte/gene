@@ -344,7 +344,7 @@ def create_pathway_crosstalk(crosstalk_df: pd.DataFrame) -> go.Figure:
         y=crosstalk_df.index.tolist(),
         colorscale="YlOrRd",
         zmin=0, zmax=1,
-        zsmooth="fast",
+        zsmooth=False,
         hovertemplate=(
             "<b>%{y}</b><br>vs <b>%{x}</b><br>"
             "Jaccard similarity: %{z:.2f}<extra></extra>"
