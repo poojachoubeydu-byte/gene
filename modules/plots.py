@@ -715,16 +715,16 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
         x=col_labels,
         y=gene_labels,
         colorscale="RdBu",
-        reversescale=False,   # Red = high, Blue = low
-        zmid=0, zmin=-2.5, zmax=2.5,   # Z-score range
-        zsmooth="fast",
+        reversescale=True,    # RdBu is Red-low/Blue-high; reverse → Red=High, Blue=Low
+        zmid=0, zmin=-2.5, zmax=2.5,
+        zsmooth=False,        # sharp tiles — no interpolation between cells
         hovertemplate=(
             "Gene: <b>%{y}</b><br>Sample: %{x}<br>"
             "Z-score: %{z:.2f}<extra></extra>"
         ),
         colorbar=dict(
-            title="Z-score",
-            thickness=12,
+            title=dict(text="Z-score<br>(Row-normalized)", side="right", font=dict(size=11)),
+            thickness=14,
             tickvals=[-2, -1, 0, 1, 2],
         ),
     ))
@@ -735,23 +735,23 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
     x_a_start, x_a_end = -0.5, n_a - 0.5
     x_b_start, x_b_end = n_a - 0.5, n_cols - 0.5
 
-    for x0, x1, color, label in [
-        (x_a_start, x_a_end, "rgba(39,174,96,0.25)",  "Group A"),
-        (x_b_start, x_b_end, "rgba(142,68,173,0.25)", "Group B"),
+    for x0, x1, fill, border, font_color, label in [
+        (x_a_start, x_a_end, "rgba(39,174,96,0.30)",  "#1e8449", "#14602e", "Group A"),
+        (x_b_start, x_b_end, "rgba(142,68,173,0.30)", "#6c3483", "#4a2060", "Group B"),
     ]:
         fig.add_shape(
             type="rect",
             xref="x", yref="paper",
-            x0=x0, x1=x1, y0=1.0, y1=1.06,
-            fillcolor=color, line_width=0,
+            x0=x0, x1=x1, y0=1.0, y1=1.07,
+            fillcolor=fill,
+            line=dict(color=border, width=1.5),
         )
         fig.add_annotation(
             xref="x", yref="paper",
-            x=(x0 + x1) / 2, y=1.03,
+            x=(x0 + x1) / 2, y=1.035,
             text=f"<b>{label}</b>",
             showarrow=False,
-            font=dict(size=10,
-                      color="#1e8449" if label == "Group A" else "#6c3483"),
+            font=dict(size=11, color=font_color),
         )
 
     fig.update_layout(
@@ -771,7 +771,7 @@ def create_top_heatmap(df: pd.DataFrame, lfc_t: float = 1.0,
             dtick=max(1, len(top) // 20),   # avoid label overlap for 100 genes
         ),
         height=max(340, min(900, len(top) * 8 + 100)),
-        margin=dict(l=80, r=20, t=70, b=60),
+        margin=dict(l=130, r=20, t=80, b=60),  # l=130 keeps gene labels clear of tiles
     )
     return fig
 
