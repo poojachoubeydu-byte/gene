@@ -1,108 +1,181 @@
 """
-AI Summary Module — Apex Bioinformatics Platform
-=================================================
-Calls the Groq free-tier API (Llama 3 8B) to generate a plain-English
-biological interpretation of the current differential expression results.
+AI Summary Module — Apex Bioinformatics Platform v3.7 (Resilient AI Edition)
+=============================================================================
+Tiered waterfall: Groq (Llama 3 70B) → Gemini 1.5 Flash → Rule-Based.
 
-Requires:  GROQ_API_KEY environment variable (set in HF Space secrets).
-Get a free key at https://console.groq.com — no credit card required.
+get_biological_story(context_data) always returns a result — never an empty
+box, even with no API keys or no internet connection.
 
-If the key is absent or the call fails the function returns a helpful
-message rather than raising, so the rest of the app is unaffected.
+API keys (set in HF Space → Settings → Repository secrets):
+    GROQ_API_KEY   — https://console.groq.com        (free, no card)
+    GEMINI_API_KEY — https://aistudio.google.com/app  (free, no card)
 """
 
 import logging
 import os
 
-import requests
-
 log = logging.getLogger(__name__)
 
-_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-_MODEL    = "llama3-8b-8192"
+# ── Shared system prompt: identical for both models so tone is consistent ─────
+_SYSTEM_PROMPT = (
+    "You are a Senior Bioinformatician with 20 years of experience in oncology "
+    "and systems biology. You interpret RNA-seq differential expression results "
+    "for a research audience. Be precise, use correct HGNC gene nomenclature, "
+    "and ground every statement strictly in the data provided."
+)
 
 
-def get_ai_interpretation(top_genes: list[dict], top_pathways: list[str]) -> str:
-    """
-    Generate a biological summary via Groq (free tier).
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt builder — identical context_data format passed to every tier
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Parameters
-    ----------
-    top_genes : list of dicts with keys 'symbol' and 'log2FC'
-                (top 10 genes ranked by meta-score)
-    top_pathways : list of pathway name strings (top 5 enriched pathways)
-
-    Returns
-    -------
-    str — markdown-formatted interpretation, or an informative fallback message.
-    """
-    api_key = os.environ.get("GROQ_API_KEY", "").strip()
-    if not api_key:
-        return (
-            "**API key not configured.**\n\n"
-            "To enable AI-powered summaries:\n"
-            "1. Get a **free** Groq API key at [console.groq.com](https://console.groq.com) "
-            "(no credit card required).\n"
-            "2. In your Hugging Face Space, go to **Settings → Repository secrets** "
-            "and add `GROQ_API_KEY` with your key.\n\n"
-            "_The rest of the app works fully without this key._"
-        )
+def _build_prompt(context_data: dict) -> str:
+    top_genes    = context_data.get("top_genes",    [])
+    top_pathways = context_data.get("top_pathways", [])
 
     gene_block = "\n".join(
         f"  {g['symbol']}: Log2FC = {float(g['log2FC']):+.3f}"
         for g in top_genes[:10]
-    )
+    ) or "  No significant genes."
+
     pathway_block = (
         "\n".join(f"  - {p}" for p in top_pathways[:5])
-        or "  No significantly enriched pathways detected at current thresholds."
+        or "  No significantly enriched pathways detected."
     )
 
-    prompt = (
-        "You are an expert bioinformatician interpreting RNA-seq differential "
-        "expression results for a research audience.\n\n"
-        f"Top 10 Significant Genes (ranked by statistical + effect-size score):\n"
+    return (
+        "Interpret these RNA-seq differential expression results:\n\n"
+        f"Top Significant Genes (ranked by |LFC| × −log10p meta-score):\n"
         f"{gene_block}\n\n"
         f"Top Enriched Pathways:\n"
         f"{pathway_block}\n\n"
-        "Write a concise 3–5 sentence biological interpretation. Address:\n"
-        "1. The most likely biological process or disease context these genes suggest.\n"
-        "2. Whether the overall expression pattern indicates pathway activation or inhibition.\n"
-        "3. Any clinically relevant genes or potential drug targets worth highlighting.\n\n"
-        "Use precise scientific language. Stay strictly grounded in the data above."
+        "Write a concise 3–5 sentence biological interpretation. Cover:\n"
+        "1. The most likely biological process or disease context.\n"
+        "2. Whether the pattern indicates pathway activation or inhibition.\n"
+        "3. Any clinically relevant genes or potential drug targets.\n\n"
+        "Use precise scientific language. Stay grounded in the data."
     )
 
-    try:
-        resp = requests.post(
-            _GROQ_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type":  "application/json",
-            },
-            json={
-                "model":       _MODEL,
-                "messages":    [{"role": "user", "content": prompt}],
-                "max_tokens":  400,
-                "temperature": 0.3,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
 
-    except requests.exceptions.Timeout:
-        log.warning("AI summary: Groq API timed out after 30 s")
+# ─────────────────────────────────────────────────────────────────────────────
+# Tier 1 — Groq (Llama 3 70B)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _call_groq(prompt: str) -> str:
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("GROQ_API_KEY not set")
+    from groq import Groq
+    client = Groq(api_key=api_key)
+    resp = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt},
+        ],
+        max_tokens=400,
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tier 2 — Gemini 1.5 Flash
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _call_gemini(prompt: str) -> str:
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not set")
+    import google.generativeai as genai
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=_SYSTEM_PROMPT,
+    )
+    resp = model.generate_content(
+        prompt,
+        generation_config={"max_output_tokens": 400, "temperature": 0.3},
+    )
+    return resp.text.strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tier 3 — Rule-Based (always works, no internet required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rule_based_summary(context_data: dict) -> str:
+    top_genes    = context_data.get("top_genes",    [])
+    top_pathways = context_data.get("top_pathways", [])
+
+    if not top_genes:
         return (
-            "⏱️ **AI summary timed out** (>30 s). "
-            "Groq is usually sub-second — this may be a temporary outage. "
-            "Try refreshing the tab."
+            "**Summary (Rule-Based):** No significant genes detected at current "
+            "thresholds. Try relaxing the |Log2FC| or p-value cutoffs."
         )
-    except requests.exceptions.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "?"
-        log.warning(f"AI summary: HTTP {status} from Groq")
-        return (
-            f"⚠️ **Groq API returned HTTP {status}.** "
-            "Check that your `GROQ_API_KEY` is valid and has not been rate-limited."
+
+    top       = top_genes[0]
+    lfc_val   = float(top.get("log2FC", 0))
+    direction = "up-regulated" if lfc_val > 0 else "down-regulated"
+    up        = [g["symbol"] for g in top_genes if float(g.get("log2FC", 0)) > 0]
+    down      = [g["symbol"] for g in top_genes if float(g.get("log2FC", 0)) < 0]
+
+    lines = [
+        f"**Summary (Rule-Based):** The highest-ranked gene is **{top['symbol']}** "
+        f"(Log2FC = {lfc_val:+.2f}, {direction})."
+    ]
+    if up:
+        lines.append(f"Up-regulated genes include: {', '.join(up[:5])}.")
+    if down:
+        lines.append(f"Down-regulated genes include: {', '.join(down[:5])}.")
+    if top_pathways:
+        extra = (f" and {len(top_pathways) - 1} other pathway(s)"
+                 if len(top_pathways) > 1 else "")
+        lines.append(
+            f"Statistical enrichment detected in **{top_pathways[0]}**{extra}."
         )
+
+    return " ".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_biological_story(context_data: dict) -> tuple[str, str]:
+    """
+    Waterfall: Groq (Llama 3 70B) → Gemini 1.5 Flash → Rule-Based.
+
+    Parameters
+    ----------
+    context_data : dict with keys:
+        'top_genes'    — list of {'symbol': str, 'log2FC': float}
+        'top_pathways' — list of pathway name strings
+
+    Returns
+    -------
+    (summary, powered_by)
+        summary    — markdown-formatted biological interpretation
+        powered_by — short label for the status badge in the UI
+    """
+    prompt = _build_prompt(context_data)
+
+    # Tier 1 — Groq
+    try:
+        text = _call_groq(prompt)
+        log.info("AI summary: Groq (Llama 3 70B) succeeded")
+        return text, "Groq · Llama 3 70B"
     except Exception as exc:
-        log.warning(f"AI summary: unexpected error — {exc}")
-        return f"⚠️ **AI summary unavailable:** {str(exc)[:200]}"
+        log.warning(f"AI summary: Groq failed — {exc}")
+
+    # Tier 2 — Gemini
+    try:
+        text = _call_gemini(prompt)
+        log.info("AI summary: Gemini 1.5 Flash succeeded")
+        return text, "Gemini · 1.5 Flash"
+    except Exception as exc:
+        log.warning(f"AI summary: Gemini failed — {exc}")
+
+    # Tier 3 — Rule-Based (guaranteed)
+    log.info("AI summary: using rule-based fallback")
+    return _rule_based_summary(context_data), "Rule-Based · Offline"

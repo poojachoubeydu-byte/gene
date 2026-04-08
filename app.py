@@ -712,7 +712,7 @@ MAIN = dbc.Col([
                         dbc.CardHeader([
                             html.Span("🤖 ", style={"fontSize": 18}),
                             html.Strong("Automated Biological Summary"),
-                            dbc.Badge("Groq · Llama 3 · Free tier", color="info",
+                            dbc.Badge("Groq → Gemini → Rule-Based", color="info",
                                       className="ms-2", style={"fontSize": 10}),
                         ]),
                         dbc.CardBody(
@@ -727,6 +727,12 @@ MAIN = dbc.Col([
                                 ),
                                 type="dot", color="#1a5276",
                             )
+                        ),
+                        dbc.CardFooter(
+                            html.Div(id="ai-status", className="small text-muted"),
+                            style={"padding": "5px 16px",
+                                   "background": "#f8f9fa",
+                                   "borderTop": "1px solid #dee2e6"},
                         ),
                     ], outline=True, className="mb-4",
                        style={"borderColor": "#1a5276"}),
@@ -1724,6 +1730,7 @@ def dl_bm_csv(n, rec):
 # handle concurrency so other users are never blocked during the API call.
 @app.callback(
     Output("ai-summary-text", "children"),
+    Output("ai-status",       "children"),
     Input("tabs",      "active_tab"),
     State("sig-store", "data"),
     State("enr-store", "data"),
@@ -1731,33 +1738,50 @@ def dl_bm_csv(n, rec):
 )
 def cb_ai_summary(active_tab, sig_rec, enr_rec):
     if active_tab != "tab-insights":
-        return dash.no_update
+        return dash.no_update, dash.no_update
 
-    from modules.ai_summary import get_ai_interpretation
+    from modules.ai_summary import get_biological_story
 
     sig_df = _s2df(sig_rec)
     if sig_df.empty:
-        return html.Small(
-            "No significant genes found at current thresholds. "
-            "Adjust |Log2FC| or p-value cutoffs and revisit this tab.",
-            className="text-muted",
+        return (
+            html.Small(
+                "No significant genes found at current thresholds. "
+                "Adjust |Log2FC| or p-value cutoffs and revisit this tab.",
+                className="text-muted",
+            ),
+            "",
         )
 
-    # Top 10 genes by meta-score: |LFC| × −log10(padj)
+    # Build context_data — identical format regardless of which tier runs
     sig_df = sig_df.copy()
     sig_df["_score"] = (sig_df["log2FC"].abs()
                         * -np.log10(sig_df["padj"].clip(lower=1e-300)))
     top_genes = (sig_df.nlargest(10, "_score")[["symbol", "log2FC"]]
                  .to_dict("records"))
 
-    # Top 5 pathway names from enr-store
-    enr_df     = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
-    top_paths  = (enr_df.head(5)["pathway"].tolist()
-                  if not enr_df.empty and "pathway" in enr_df.columns
-                  else [])
+    enr_df    = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
+    top_paths = (enr_df.head(5)["pathway"].tolist()
+                 if not enr_df.empty and "pathway" in enr_df.columns
+                 else [])
 
-    summary = get_ai_interpretation(top_genes, top_paths)
-    return dcc.Markdown(summary, style={"fontSize": 13, "lineHeight": "1.75"})
+    context_data = {"top_genes": top_genes, "top_pathways": top_paths}
+    summary, powered_by = get_biological_story(context_data)
+
+    is_offline = "Offline" in powered_by or "Rule" in powered_by
+    status = html.Span([
+        "⚡ Powered by ",
+        dbc.Badge(
+            powered_by,
+            color="secondary" if is_offline else "info",
+            style={"fontSize": 10},
+        ),
+    ])
+
+    return (
+        dcc.Markdown(summary, style={"fontSize": 13, "lineHeight": "1.75"}),
+        status,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
