@@ -554,6 +554,8 @@ MAIN = dbc.Col([
     dcc.Store(id="cache-gsea",  storage_type="memory"),  # fp when GSEA was last computed
     dcc.Store(id="cache-net",   storage_type="memory"),  # fp when Network was last computed
     dcc.Store(id="cache-bm",    storage_type="memory"),  # fp when Biomarker was last computed
+    # ── Fires once on page load to show AI status badge before any analysis ──
+    dcc.Interval(id="key-check-interval", interval=800, max_intervals=1, n_intervals=0),
 
     # Summary banner
     html.Div(id="banner",
@@ -761,8 +763,8 @@ MAIN = dbc.Col([
                             html.Span("✨ ", style={"fontSize": 14}),
                             "The ",
                             html.Strong("Research Copilot"),
-                            " (Powered by Groq) is now in the left sidebar "
-                            "and updates automatically as you switch tabs.",
+                            " (AI-powered when keys are configured) is in the left sidebar "
+                            "and updates automatically as you switch tabs or click Refresh.",
                         ],
                         color="info", className="py-2 px-3 mb-3 small",
                     ),
@@ -875,17 +877,34 @@ def cb_sig_store(rec, lfc_t, p_t):
     return sig.to_dict("records") if not sig.empty else []
 
 
-# ── Refresh button: force-clears all tab caches ────────────────────────────────
+# ── Refresh button: force-clears all tab caches + enrichment store ─────────────
 @app.callback(
     Output("cache-pca",  "data", allow_duplicate=True),
     Output("cache-gsea", "data", allow_duplicate=True),
     Output("cache-net",  "data", allow_duplicate=True),
     Output("cache-bm",   "data", allow_duplicate=True),
+    Output("enr-store",  "data", allow_duplicate=True),
     Input("refresh-tab-btn", "n_clicks"),
     prevent_initial_call=True,
 )
 def cb_refresh_tabs(_):
-    return None, None, None, None
+    # Clearing enr-store forces enrichment to re-run on the Volcano tab.
+    # Clearing all cache fingerprints forces lazy-tab analyses to re-run.
+    return None, None, None, None, []
+
+
+# ── Startup key check: sets AI badge immediately on page load ─────────────────
+# Fires once after 800 ms via dcc.Interval so the badge shows the correct
+# model name even before the user switches a tab.
+@app.callback(
+    Output("sidebar-ai-badge", "children", allow_duplicate=True),
+    Input("key-check-interval", "n_intervals"),
+    prevent_initial_call=True,
+)
+def cb_key_status(_):
+    from modules.ai_summary import check_available_model
+    label, color = check_available_model()
+    return dbc.Badge(label, color=color, style={"fontSize": 9})
 
 
 # ── Summary banner ────────────────────────────────────────────────────────────
@@ -1650,44 +1669,111 @@ def cb_gene(gene):
     return html.Div(parts)
 
 
-# ── PDF download ──────────────────────────────────────────────────────────────
+# ── PDF download (publishable quality — v3.8) ────────────────────────────────
 @app.callback(
-    Output("dl-pdf",   "data"),
-    Input("btn-pdf",   "n_clicks"),
-    State("volcano",   "figure"),
-    State("pca",       "figure"),
-    State("enr-store", "data"),
-    State("bm-store",  "data"),
-    State("store",     "data"),
-    State("lfc-thresh","value"),
-    State("p-thresh",  "value"),
+    Output("dl-pdf",    "data"),
+    Input("btn-pdf",    "n_clicks"),
+    State("volcano",    "figure"),
+    State("pca",        "figure"),
+    State("bubble",     "figure"),
+    State("path-bar",   "figure"),
+    State("crosstalk",  "figure"),
+    State("heatmap",    "figure"),
+    State("enr-store",  "data"),
+    State("bm-store",   "data"),
+    State("store",      "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh",   "value"),
+    State("sig-store",  "data"),
     prevent_initial_call=True,
 )
-def cb_pdf(n, vol, pca_f, enr_recs, bm_recs, data_recs, lfc_t, p_t):
+def cb_pdf(n, vol, pca_f, bubble_f, bar_f, crosstalk_f, heatmap_f,
+           enr_recs, bm_recs, data_recs, lfc_t, p_t, sig_recs):
     if not n:
         return dash.no_update
     try:
         df     = _s2df(data_recs)
         enr_df = pd.DataFrame(enr_recs or [])
-        bm_df  = pd.DataFrame(bm_recs  or [])
         drug_df = get_drug_targets(
             df.loc[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t),
                    "symbol"].str.upper().tolist()
         )
 
-        up  = int(((df["log2FC"] >  lfc_t) & (df["padj"] < p_t)).sum())
-        dn  = int(((df["log2FC"] < -lfc_t) & (df["padj"] < p_t)).sum())
+        up    = int(((df["log2FC"] >  lfc_t) & (df["padj"] < p_t)).sum())
+        dn    = int(((df["log2FC"] < -lfc_t) & (df["padj"] < p_t)).sum())
         stats = {"total": len(df), "up": up, "down": dn, "sig": up + dn}
 
         insights = generate_insights(df, enr_df, lfc_t, p_t)
 
+        # ── AI Discussion (Deep Scanning) for PDF Discussion section ──────────
+        ai_discussion = None
+        ai_powered_by = ""
+        try:
+            from modules.ai_summary import get_biological_story
+            sig_df = _s2df(sig_recs)
+            if not sig_df.empty:
+                sig_df = sig_df.copy()
+                sig_df["_score"] = (
+                    sig_df["log2FC"].abs()
+                    * -np.log10(sig_df["padj"].clip(lower=1e-300))
+                )
+                top_genes = (
+                    sig_df.nlargest(10, "_score")[["symbol", "log2FC"]]
+                    .to_dict("records")
+                )
+                top_paths = (
+                    enr_df.head(5)["pathway"].tolist()
+                    if not enr_df.empty and "pathway" in enr_df.columns
+                    else []
+                )
+                # Jaccard pairs for Deep Scanning
+                jaccard_pairs = []
+                if not enr_df.empty and "genes" in enr_df.columns and len(enr_df) >= 2:
+                    gene_sets = []
+                    for _, row in enr_df.head(6).iterrows():
+                        gs = {g.strip().upper()
+                              for g in str(row.get("genes", "")).split(",") if g.strip()}
+                        if gs:
+                            gene_sets.append((str(row.get("pathway", ""))[:35], gs))
+                    for i, (pa, sa) in enumerate(gene_sets):
+                        for pb, sb in gene_sets[i + 1:]:
+                            union = sa | sb
+                            if union:
+                                inter = sa & sb
+                                jaccard_pairs.append({
+                                    "a": pa, "b": pb,
+                                    "j": len(inter) / len(union),
+                                    "shared": len(inter),
+                                })
+                    jaccard_pairs.sort(key=lambda x: -x["j"])
+
+                ctx = {
+                    "top_genes":     top_genes,
+                    "top_pathways":  top_paths,
+                    "jaccard_pairs": jaccard_pairs,
+                    "extra":         (
+                        f"Report generated at "
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M')} UTC. "
+                        f"{up} up-regulated, {dn} down-regulated significant genes."
+                    ),
+                }
+                ai_discussion, ai_powered_by = get_biological_story(ctx)
+        except Exception as ai_exc:
+            log.warning(f"pdf ai discussion: {ai_exc}")
+
         pdf = generate_pdf_report(
-            go.Figure(vol)   if vol   else None,
+            go.Figure(vol)         if vol         else None,
             enr_df,
-            go.Figure(pca_f) if pca_f else None,
+            go.Figure(pca_f)       if pca_f       else None,
             drug_df=drug_df,
             insights=insights,
             summary_stats=stats,
+            bubble_fig=go.Figure(bubble_f)     if bubble_f     else None,
+            bar_fig=go.Figure(bar_f)           if bar_f        else None,
+            crosstalk_fig=go.Figure(crosstalk_f) if crosstalk_f else None,
+            heatmap_fig=go.Figure(heatmap_f)   if heatmap_f    else None,
+            ai_discussion=ai_discussion,
+            powered_by=ai_powered_by,
         )
         fname = f"Apex_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
         return dcc.send_bytes(pdf, fname)
@@ -1755,27 +1841,30 @@ def dl_bm_csv(n, rec):
     return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "biomarker_scores.csv", index=False)
 
 
-# ── Research Copilot: context-aware AI sidebar (fires on every tab change) ──────
+# ── Research Copilot: context-aware AI sidebar (fires on tab change OR refresh) ─
 # Outputs to sidebar-ai-text / sidebar-ai-status so the copilot is always
 # visible regardless of the active tab.  Gunicorn workers handle concurrency.
 @app.callback(
     Output("sidebar-ai-text",   "children"),
     Output("sidebar-ai-status", "children"),
-    Output("sidebar-ai-badge",  "children"),
-    Input("tabs",      "active_tab"),
+    Output("sidebar-ai-badge",  "children", allow_duplicate=True),
+    Input("tabs",             "active_tab"),
+    Input("refresh-tab-btn",  "n_clicks"),
     State("sig-store", "data"),
     State("enr-store", "data"),
     State("store",     "data"),
     State("bm-store",  "data"),
     prevent_initial_call=True,
 )
-def cb_ai_summary(active_tab, sig_rec, enr_rec, full_rec, bm_rec):
+def cb_ai_summary(active_tab, _refresh_clicks, sig_rec, enr_rec, full_rec, bm_rec):
     from modules.ai_summary import get_biological_story
 
     sig_df  = _s2df(sig_rec)
     enr_df  = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
 
     if sig_df.empty:
+        from modules.ai_summary import check_available_model
+        label, color = check_available_model()
         return (
             html.Small(
                 "No significant genes at current thresholds. "
@@ -1783,7 +1872,7 @@ def cb_ai_summary(active_tab, sig_rec, enr_rec, full_rec, bm_rec):
                 className="text-muted",
             ),
             "",
-            dbc.Badge("Offline", color="secondary", style={"fontSize": 9}),
+            dbc.Badge(label, color=color, style={"fontSize": 9}),
         )
 
     # ── Shared top-gene / pathway context (meta-score ranked) ─────────────────
@@ -1800,6 +1889,28 @@ def cb_ai_summary(active_tab, sig_rec, enr_rec, full_rec, bm_rec):
         if not enr_df.empty and "pathway" in enr_df.columns
         else []
     )
+
+    # ── Jaccard gene-overlap pairs (Deep Scanning context) ────────────────────
+    jaccard_pairs = []
+    if not enr_df.empty and "genes" in enr_df.columns and len(enr_df) >= 2:
+        top_enr = enr_df.head(6)
+        gene_sets = []
+        for _, row in top_enr.iterrows():
+            genes_str = str(row.get("genes", ""))
+            gene_set  = {g.strip().upper() for g in genes_str.split(",") if g.strip()}
+            if gene_set:
+                gene_sets.append((str(row.get("pathway", ""))[:35], gene_set))
+        for i, (pa, sa) in enumerate(gene_sets):
+            for pb, sb in gene_sets[i + 1:]:
+                union = sa | sb
+                if union:
+                    inter = sa & sb
+                    jaccard_pairs.append({
+                        "a": pa, "b": pb,
+                        "j": len(inter) / len(union),
+                        "shared": len(inter),
+                    })
+        jaccard_pairs.sort(key=lambda x: -x["j"])
 
     # ── Tab-specific extra context string ─────────────────────────────────────
     extra_ctx = ""
@@ -1858,9 +1969,10 @@ def cb_ai_summary(active_tab, sig_rec, enr_rec, full_rec, bm_rec):
     # tab-insights / fallback: no extra context needed
 
     context_data = {
-        "top_genes":    top_genes,
-        "top_pathways": top_paths,
-        "extra":        extra_ctx,
+        "top_genes":     top_genes,
+        "top_pathways":  top_paths,
+        "extra":         extra_ctx,
+        "jaccard_pairs": jaccard_pairs,   # Deep Scanning gene-overlap context
     }
 
     try:
@@ -1872,10 +1984,11 @@ def cb_ai_summary(active_tab, sig_rec, enr_rec, full_rec, bm_rec):
             "Rule-Based · Offline",
         )
 
-    is_offline = "Offline" in powered_by or "Rule" in powered_by
-    is_groq    = "Groq" in powered_by
-    badge_color = "success" if is_groq else ("secondary" if is_offline else "info")
-    badge = dbc.Badge(powered_by, color=badge_color, style={"fontSize": 9})
+    is_offline  = "Offline" in powered_by or "Rule" in powered_by
+    is_live     = not is_offline
+    badge_color = ("success" if ("Groq" in powered_by or "Anthropic" in powered_by)
+                   else ("info" if "Gemini" in powered_by else "secondary"))
+    badge  = dbc.Badge(powered_by, color=badge_color, style={"fontSize": 9})
     status = html.Span(["⚡ Powered by ", badge])
 
     return (

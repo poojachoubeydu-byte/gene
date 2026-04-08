@@ -1,14 +1,15 @@
 """
-AI Summary Module — Apex Bioinformatics Platform v3.7 (Resilient AI Edition)
-=============================================================================
-Tiered waterfall: Groq (Llama 3 70B) → Gemini 1.5 Flash → Rule-Based.
+AI Summary Module — Apex Bioinformatics Platform v3.8 (Deep Scan Edition)
+==========================================================================
+Tiered waterfall: Groq (Llama 3 70B) → Anthropic (Claude Haiku) → Gemini 1.5 Flash → Rule-Based.
 
 get_biological_story(context_data) always returns a result — never an empty
 box, even with no API keys or no internet connection.
 
-API keys (set in HF Space → Settings → Repository secrets):
-    GROQ_API_KEY   — https://console.groq.com        (free, no card)
-    GEMINI_API_KEY — https://aistudio.google.com/app  (free, no card)
+API keys (set in HF Space → Settings → Repository secrets OR .env file):
+    GROQ_API_KEY       — https://console.groq.com              (free, no card)
+    ANTHROPIC_API_KEY  — https://console.anthropic.com         (free tier)
+    GEMINI_API_KEY     — https://aistudio.google.com/app       (free, no card)
 """
 
 import logging
@@ -16,7 +17,7 @@ import os
 
 log = logging.getLogger(__name__)
 
-# ── Shared system prompt: identical for both models so tone is consistent ─────
+# ── Shared system prompt ──────────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
     "You are a Senior Bioinformatician with 20 years of experience in oncology "
     "and systems biology. You interpret RNA-seq differential expression results "
@@ -26,13 +27,38 @@ _SYSTEM_PROMPT = (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prompt builder — identical context_data format passed to every tier
+# Public status helper — called on page load for the startup badge
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_available_model() -> tuple[str, str]:
+    """
+    Returns (label, badge_color) for the first detected API key.
+    Does NOT make any network calls — purely an env-var check.
+
+    Returns
+    -------
+    (label, badge_color)
+        label       — short model name for the badge
+        badge_color — Bootstrap color ('success', 'info', 'secondary')
+    """
+    if os.environ.get("GROQ_API_KEY", "").strip():
+        return "Online · Groq Llama 3", "success"
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return "Online · Claude Haiku", "success"
+    if os.environ.get("GEMINI_API_KEY", "").strip():
+        return "Online · Gemini Flash", "info"
+    return "Offline · Rule-Based", "secondary"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt builder — accepts optional jaccard_pairs for Deep Scanning
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_prompt(context_data: dict) -> str:
-    top_genes    = context_data.get("top_genes",    [])
-    top_pathways = context_data.get("top_pathways", [])
-    extra        = context_data.get("extra",        "")
+    top_genes     = context_data.get("top_genes",     [])
+    top_pathways  = context_data.get("top_pathways",  [])
+    extra         = context_data.get("extra",         "")
+    jaccard_pairs = context_data.get("jaccard_pairs", [])
 
     gene_block = "\n".join(
         f"  {g['symbol']}: Log2FC = {float(g['log2FC']):+.3f}"
@@ -44,6 +70,17 @@ def _build_prompt(context_data: dict) -> str:
         or "  No significantly enriched pathways detected."
     )
 
+    # ── Jaccard overlap block (Deep Scanning) ─────────────────────────────────
+    jaccard_block = ""
+    if jaccard_pairs:
+        lines = ["Jaccard Gene Overlap Between Top Pathways (shared gene burden):"]
+        for pair in jaccard_pairs[:5]:
+            lines.append(
+                f"  {pair['a']} ↔ {pair['b']}: "
+                f"J={pair['j']:.2f} ({pair['shared']} shared genes)"
+            )
+        jaccard_block = "\n" + "\n".join(lines) + "\n"
+
     extra_block = f"\nAdditional context: {extra}\n" if extra else ""
 
     return (
@@ -52,12 +89,15 @@ def _build_prompt(context_data: dict) -> str:
         f"{gene_block}\n\n"
         f"Top Enriched Pathways:\n"
         f"{pathway_block}\n"
+        f"{jaccard_block}"
         f"{extra_block}\n"
         "Write a concise 3–5 sentence biological interpretation. Cover:\n"
         "1. The most likely biological process or disease context.\n"
         "2. Whether the pattern indicates pathway activation or inhibition.\n"
-        "3. Any clinically relevant genes or potential drug targets.\n\n"
-        "Use precise scientific language. Stay grounded in the data."
+        "3. Any clinically relevant genes or potential drug targets.\n"
+        + ("4. What the pathway gene overlap pattern implies about crosstalk "
+           "or co-regulation.\n" if jaccard_pairs else "")
+        + "\nUse precise scientific language. Stay grounded in the data."
     )
 
 
@@ -68,31 +108,42 @@ def _build_prompt(context_data: dict) -> str:
 def _call_groq(prompt: str) -> str:
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
-        print("[AI Copilot] Groq SKIPPED — GROQ_API_KEY not set")
         raise ValueError("GROQ_API_KEY not set")
     from groq import Groq
     client = Groq(api_key=api_key)
-    try:
-        resp = client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user",   "content": prompt},
-            ],
-            max_tokens=400,
-            temperature=0.3,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as groq_exc:
-        # Capture the exact error type so we can distinguish
-        # AuthenticationError / RateLimitError / APIConnectionError etc.
-        err_type = type(groq_exc).__name__
-        print(f"[AI Copilot] Groq FAILED — {err_type}: {groq_exc}")
-        raise
+    resp = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt},
+        ],
+        max_tokens=500,
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tier 2 — Gemini 1.5 Flash
+# Tier 2 — Anthropic (Claude Haiku)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _call_anthropic(prompt: str) -> str:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY not set")
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key)
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=500,
+        system=_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text.strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tier 3 — Gemini 1.5 Flash
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _call_gemini(prompt: str) -> str:
@@ -107,13 +158,13 @@ def _call_gemini(prompt: str) -> str:
     )
     resp = model.generate_content(
         prompt,
-        generation_config={"max_output_tokens": 400, "temperature": 0.3},
+        generation_config={"max_output_tokens": 500, "temperature": 0.3},
     )
     return resp.text.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tier 3 — Rule-Based (always works, no internet required)
+# Tier 4 — Rule-Based (always works, no internet required)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _rule_based_summary(context_data: dict) -> str:
@@ -156,13 +207,15 @@ def _rule_based_summary(context_data: dict) -> str:
 
 def get_biological_story(context_data: dict, **kwargs) -> tuple[str, str]:
     """
-    Waterfall: Groq (Llama 3 70B) → Gemini 1.5 Flash → Rule-Based.
+    Waterfall: Groq → Anthropic (Claude Haiku) → Gemini 1.5 Flash → Rule-Based.
 
     Parameters
     ----------
     context_data : dict with keys:
-        'top_genes'    — list of {'symbol': str, 'log2FC': float}
-        'top_pathways' — list of pathway name strings
+        'top_genes'     — list of {'symbol': str, 'log2FC': float}
+        'top_pathways'  — list of pathway name strings
+        'jaccard_pairs' — list of {'a', 'b', 'j', 'shared'} dicts (optional)
+        'extra'         — additional context string (optional)
 
     Returns
     -------
@@ -170,9 +223,14 @@ def get_biological_story(context_data: dict, **kwargs) -> tuple[str, str]:
         summary    — markdown-formatted biological interpretation
         powered_by — short label for the status badge in the UI
     """
-    # Fix 2 — explicit key detection printed to terminal on every AI call
-    _groq_key = os.environ.get("GROQ_API_KEY", "").strip()
-    print(f"[AI Copilot] GROQ_API_KEY : {'Detected' if _groq_key else 'None/Missing'}")
+    _groq_key       = os.environ.get("GROQ_API_KEY",       "").strip()
+    _anthropic_key  = os.environ.get("ANTHROPIC_API_KEY",  "").strip()
+    _gemini_key     = os.environ.get("GEMINI_API_KEY",     "").strip()
+    print(
+        f"[AI Copilot] Keys — GROQ: {'✅' if _groq_key else '❌'}  "
+        f"ANTHROPIC: {'✅' if _anthropic_key else '❌'}  "
+        f"GEMINI: {'✅' if _gemini_key else '❌'}"
+    )
 
     prompt = _build_prompt(context_data)
 
@@ -184,9 +242,19 @@ def get_biological_story(context_data: dict, **kwargs) -> tuple[str, str]:
         return text, "Groq · Llama 3 70B"
     except Exception as exc:
         log.warning(f"AI summary: Groq failed — {exc}")
-        # exc details already printed inside _call_groq
+        print(f"[AI Copilot] Groq FAILED — {type(exc).__name__}: {exc}")
 
-    # Tier 2 — Gemini
+    # Tier 2 — Anthropic
+    try:
+        text = _call_anthropic(prompt)
+        log.info("AI summary: Anthropic (Claude Haiku) succeeded")
+        print("[AI Copilot] Anthropic SUCCESS")
+        return text, "Anthropic · Claude Haiku"
+    except Exception as exc:
+        log.warning(f"AI summary: Anthropic failed — {exc}")
+        print(f"[AI Copilot] Anthropic FAILED — {type(exc).__name__}: {exc}")
+
+    # Tier 3 — Gemini
     try:
         text = _call_gemini(prompt)
         log.info("AI summary: Gemini 1.5 Flash succeeded")
@@ -196,7 +264,7 @@ def get_biological_story(context_data: dict, **kwargs) -> tuple[str, str]:
         log.warning(f"AI summary: Gemini failed — {exc}")
         print(f"[AI Copilot] Gemini FAILED — {type(exc).__name__}: {exc}")
 
-    # Tier 3 — Rule-Based (guaranteed)
+    # Tier 4 — Rule-Based (guaranteed)
     print("[AI Copilot] Falling back to Rule-Based")
     log.info("AI summary: using rule-based fallback")
     return _rule_based_summary(context_data), "Rule-Based · Offline"
