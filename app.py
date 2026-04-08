@@ -27,7 +27,8 @@ import dash_bootstrap_components as dbc
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Input, Output, State, ctx, dash_table, dcc, html
+import diskcache
+from dash import DiskcacheManager, Input, Output, State, ctx, dash_table, dcc, html
 
 # ── local modules ─────────────────────────────────────────────────────────────
 from modules.analysis import (
@@ -65,6 +66,10 @@ from data.gene_annotations import get_drug_targets, get_cancer_gene_info
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+# ── Background-callback manager (diskcache — no Redis/Celery needed) ──────────
+_bg_cache  = diskcache.Cache("./cache")
+_bg_manager = DiskcacheManager(_bg_cache)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Global symbol cleaner (mirrors modules/analysis._clean_sym)
@@ -88,6 +93,7 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Apex Bioinformatics",
     meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
+    background_callback_manager=_bg_manager,
 )
 server = app.server   # Gunicorn entry point
 
@@ -705,14 +711,43 @@ MAIN = dbc.Col([
         dbc.Tab(label="📋 Insights", tab_id="tab-insights", children=[
             dbc.Row([
                 dbc.Col([
+
+                    # ── AI Summary Card ───────────────────────────────────
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.Span("🤖 ", style={"fontSize": 18}),
+                            html.Strong("Automated Biological Summary"),
+                            dbc.Badge("Groq · Llama 3 · Free tier", color="info",
+                                      className="ms-2", style={"fontSize": 10}),
+                        ]),
+                        dbc.CardBody([
+                            html.Div(
+                                dbc.Spinner(color="primary", size="sm"),
+                                id="ai-summary-spinner",
+                                style={"display": "none", "marginBottom": "8px"},
+                            ),
+                            html.Div(
+                                id="ai-summary-text",
+                                children=html.Small(
+                                    "Open this tab to generate an AI-powered summary "
+                                    "of your top genes and pathways.",
+                                    className="text-muted",
+                                ),
+                            ),
+                        ]),
+                    ], outline=True, className="mb-4",
+                       style={"borderColor": "#1a5276"}),
+
+                    # ── Rule-based Insights ───────────────────────────────
                     html.H5("🔬 Auto-Generated Biological Insights",
                             className="fw-bold mt-2 mb-1", style={"color": "#1a5276"}),
                     html.Small(
                         "Rule-based interpretation of your differential expression results. "
-                        "No AI — fully reproducible, offline.",
+                        "Fully reproducible, offline.",
                         className="text-muted d-block mb-3",
                     ),
                     dcc.Loading(html.Div(id="insights-panel"), type="circle"),
+
                 ], width=12),
             ], className="px-3 mt-2"),
         ]),
@@ -1689,6 +1724,54 @@ def dl_bm_csv(n, rec):
     if not n or not rec:
         return dash.no_update
     return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "biomarker_scores.csv", index=False)
+
+
+# ── AI Biological Summary (background — non-blocking, Groq free tier) ─────────
+@app.callback(
+    Output("ai-summary-text", "children"),
+    Input("tabs",      "active_tab"),
+    State("sig-store", "data"),
+    State("enr-store", "data"),
+    background=True,
+    running=[
+        (Output("ai-summary-spinner", "style"),
+         {"display": "block", "marginBottom": "8px"},
+         {"display": "none"}),
+        (Output("ai-summary-text", "style"),
+         {"opacity": "0.35", "pointerEvents": "none"},
+         {"opacity": "1",    "pointerEvents": "auto"}),
+    ],
+    prevent_initial_call=True,
+)
+def cb_ai_summary(active_tab, sig_rec, enr_rec):
+    if active_tab != "tab-insights":
+        return dash.no_update
+
+    from modules.ai_summary import get_ai_interpretation
+
+    sig_df = _s2df(sig_rec)
+    if sig_df.empty:
+        return html.Small(
+            "No significant genes found at current thresholds. "
+            "Adjust |Log2FC| or p-value cutoffs and revisit this tab.",
+            className="text-muted",
+        )
+
+    # Top 10 genes by meta-score: |LFC| × −log10(padj)
+    sig_df = sig_df.copy()
+    sig_df["_score"] = (sig_df["log2FC"].abs()
+                        * -np.log10(sig_df["padj"].clip(lower=1e-300)))
+    top_genes = (sig_df.nlargest(10, "_score")[["symbol", "log2FC"]]
+                 .to_dict("records"))
+
+    # Top 5 pathway names from enr-store
+    enr_df     = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
+    top_paths  = (enr_df.head(5)["pathway"].tolist()
+                  if not enr_df.empty and "pathway" in enr_df.columns
+                  else [])
+
+    summary = get_ai_interpretation(top_genes, top_paths)
+    return dcc.Markdown(summary, style={"fontSize": 13, "lineHeight": "1.75"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
