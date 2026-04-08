@@ -603,22 +603,25 @@ MAIN = dbc.Col([
         dbc.Tab(label="📊 Advanced Analytics", tab_id="tab-adv", children=[
             dbc.Row([
                 dbc.Col(dcc.Loading(
-                    dcc.Graph(id="ma-plot",  style={"height": 340}), type="circle",
+                    dcc.Graph(id="ma-plot",   style={"height": 360}), type="circle",
                 ), width=6),
                 dbc.Col(dcc.Loading(
-                    dcc.Graph(id="heatmap",  style={"height": 340}), type="circle",
+                    dcc.Graph(id="pval-hist", style={"height": 360}), type="circle",
                 ), width=6),
             ], className="mt-2 px-2"),
             dbc.Row([
                 dbc.Col(dcc.Loading(
-                    dcc.Graph(id="pval-hist", style={"height": 300}), type="circle",
-                ), width=4),
+                    dcc.Graph(id="heatmap", style={"minHeight": 500, "height": "auto"}),
+                    type="circle",
+                ), width=12),
+            ], className="px-2 mt-2"),
+            dbc.Row([
                 dbc.Col(dcc.Loading(
                     dcc.Graph(id="lfc-dist",  style={"height": 300}), type="circle",
-                ), width=4),
+                ), width=6),
                 dbc.Col(dcc.Loading(
                     dcc.Graph(id="rank-plot", style={"height": 300}), type="circle",
-                ), width=4),
+                ), width=6),
             ], className="px-2 mt-1"),
         ]),
 
@@ -1183,23 +1186,31 @@ def cb_crosstalk(records, active_tab):
     Input("store",     "data"),
     State("data-fp",   "data"),
     State("cache-pca", "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh",   "value"),
     prevent_initial_call=True,
 )
-def cb_pca(active_tab, rec, fp, cache_fp):
+def cb_pca(active_tab, rec, fp, cache_fp, lfc_t, p_t):
     if active_tab != "tab-pca":
         return dash.no_update, dash.no_update, dash.no_update
     if cache_fp and cache_fp == fp:
         return dash.no_update, dash.no_update, dash.no_update  # already fresh
+    lfc_t = lfc_t or 1.0
+    p_t   = p_t   or 0.05
     try:
-        res = run_pca_3d(_s2df(rec))
+        df  = _s2df(rec)
+        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+        pca_df = sig if len(sig) >= 6 else df
+        res = run_pca_3d(pca_df)
         if "error" in res:
             return blank(res["error"]), res["error"], None
         v = res["explained_variance"]
+        label = "significant genes" if len(sig) >= 6 else "all genes (< 6 significant)"
         return (
             create_pca_3d(res),
             (f"{res['n_clusters']} clusters  |  variance: "
              f"PC1 {v[0]:.1f}%  PC2 {v[1]:.1f}%  PC3 {v[2]:.1f}%  "
-             f"|  {len(res['genes'])} genes"),
+             f"|  {len(res['genes'])} {label}"),
             fp,
         )
     except Exception as e:
@@ -1223,14 +1234,18 @@ def cb_pca(active_tab, rec, fp, cache_fp):
 def cb_advanced(rec, lfc_t, p_t, active_tab):
     if active_tab != "tab-adv":
         return (dash.no_update,) * 5
+    lfc_t = lfc_t or 1.0
+    p_t   = p_t   or 0.05
     try:
-        df = _s2df(rec)
+        df  = _s2df(rec)
+        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+        plot_df = sig if not sig.empty else df
         return (
-            create_ma_plot(df),
-            create_top_heatmap(df, lfc_t, p_t),
-            create_pval_hist(df),
-            create_lfc_dist(df),
-            create_rank_metric(df),
+            create_ma_plot(plot_df),
+            create_top_heatmap(plot_df, lfc_t, p_t),
+            create_pval_hist(plot_df),
+            create_lfc_dist(plot_df),
+            create_rank_metric(plot_df),
         )
     except Exception as e:
         log.error(f"adv: {e}")
@@ -1440,22 +1455,28 @@ def cb_drugs(rec, lfc_t, p_t, active_tab):
     Output("cache-bm",     "data", allow_duplicate=True),
     Input("tabs",       "active_tab"),
     Input("store",      "data"),
-    State("data-fp",  "data"),
-    State("cache-bm", "data"),
+    State("data-fp",    "data"),
+    State("cache-bm",   "data"),
+    State("lfc-thresh", "value"),
+    State("p-thresh",   "value"),
     prevent_initial_call=True,
 )
-def cb_biomarker(active_tab, rec, fp, cache_fp):
+def cb_biomarker(active_tab, rec, fp, cache_fp, lfc_t, p_t):
     if active_tab != "tab-bm":
         return (dash.no_update,) * 4
     if cache_fp and cache_fp == fp:
         return (dash.no_update,) * 4
+    lfc_t = lfc_t or 1.0
+    p_t   = p_t   or 0.05
     try:
-        df     = _s2df(rec)
-        bm_df  = compute_biomarker_score(df)
+        df  = _s2df(rec)
+        sig = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
+        bm_src = sig if not sig.empty else df
+        bm_df  = compute_biomarker_score(bm_src)
         fig    = create_biomarker_score_chart(bm_df)
 
-        # Cancer gene table
-        all_genes = df["symbol"].astype(str).str.upper().tolist()
+        # Cancer gene table — significant genes only
+        all_genes = bm_src["symbol"].astype(str).str.upper().tolist()
         cg_df = get_cancer_gene_info(all_genes)
         if cg_df.empty:
             cancer_tbl = html.P("No COSMIC cancer genes found in this dataset.",
@@ -1497,10 +1518,13 @@ def cb_biomarker(active_tab, rec, fp, cache_fp):
 def cb_insights(rec, enr_rec, lfc_t, p_t, active_tab):
     if active_tab != "tab-insights":
         return dash.no_update
+    lfc_t = lfc_t or 1.0
+    p_t   = p_t   or 0.05
     try:
         df     = _s2df(rec)
+        sig    = df[(df["log2FC"].abs() >= lfc_t) & (df["padj"] < p_t)]
         enr_df = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
-        insights = generate_insights(df, enr_df, lfc_t, p_t)
+        insights = generate_insights(sig if not sig.empty else df, enr_df, lfc_t, p_t)
 
         if not insights:
             return html.P("No insights generated yet. Run analyses first.",
