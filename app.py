@@ -811,8 +811,9 @@ MAIN = dbc.Col([
             ], className="px-3 mt-2"),
         ]),
 
-    ], id="tabs", active_tab="tab-meta"),
-], width=9, style={"overflowX": "auto"})
+    ], id="tabs", active_tab="tab-meta",
+       style={"minWidth": "900px"}),
+], width=9, style={"overflowX": "auto", "maxWidth": "100%"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -859,7 +860,7 @@ _AUDIT_OFFCANVAS = dbc.Offcanvas(
     is_open=False,
     backdrop=False,      # leave the main panel interactive
     scrollable=True,
-    style={"width": "48%", "minWidth": "520px", "maxWidth": "820px"},
+    style={"width": "26%", "minWidth": "380px", "maxWidth": "460px"},
     children=[
         # Model attribution badge
         html.Div(id="audit-model-badge", className="mb-3"),
@@ -2024,10 +2025,18 @@ def dl_bm_csv(n, rec):
 # Deep-Analysis Research Consultant callbacks
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_audit_context(sig_rec, enr_rec, lfc_thresh, p_thresh) -> dict:
+def _build_audit_context(
+    sig_rec,
+    enr_rec,
+    lfc_thresh,
+    p_thresh,
+    active_tab: str = "",
+    pca_variance: str = "",
+) -> dict:
     """
     Assemble the rich context_data dict fed to the 4-layer AI prompt.
-    Returns the dict, plus n_up and n_down for banner display.
+    active_tab and pca_variance are forwarded so the AI can give
+    tab-specific data-grounded interpretation.
     """
     sig_df = _s2df(sig_rec)
     enr_df = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
@@ -2110,6 +2119,8 @@ def _build_audit_context(sig_rec, enr_rec, lfc_thresh, p_thresh) -> dict:
         "n_up":          n_up,
         "n_down":        n_down,
         "extra":         extra_ctx,
+        "active_tab":    active_tab,
+        "pca_variance":  pca_variance,
     }
 
 
@@ -2126,12 +2137,22 @@ def _build_audit_context(sig_rec, enr_rec, lfc_thresh, p_thresh) -> dict:
     State("lfc-thresh",  "value"),
     State("p-thresh",    "value"),
     State("pathway-db",  "value"),
+    State("tabs",        "active_tab"),
+    State("pca-info",    "children"),   # PCA variance text (populated after PCA tab visit)
     prevent_initial_call=True,
 )
-def cb_open_audit(n_clicks, sig_rec, enr_rec, lfc_thresh, p_thresh, pathway_db):
+def cb_open_audit(n_clicks, sig_rec, enr_rec, lfc_thresh, p_thresh, pathway_db,
+                  active_tab, pca_info):
     from modules.ai_summary import get_biological_story_cached, check_available_model
 
-    context_data = _build_audit_context(sig_rec, enr_rec, lfc_thresh, p_thresh)
+    # Normalise pca_info — it may be a string or a Dash component dict
+    pca_variance = pca_info if isinstance(pca_info, str) else ""
+
+    context_data = _build_audit_context(
+        sig_rec, enr_rec, lfc_thresh, p_thresh,
+        active_tab=active_tab or "",
+        pca_variance=pca_variance,
+    )
 
     # Badge
     badge_label, badge_color = check_available_model()

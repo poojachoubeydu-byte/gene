@@ -40,9 +40,13 @@ def _make_cache_key(
     lfc_thresh: float,
     p_thresh: float,
     pathway_db: str,
+    active_tab: str = "",
 ) -> str:
     gene_part = ",".join(sorted(g["symbol"].upper() for g in top_genes))
-    raw       = f"{gene_part}|{round(lfc_thresh, 3)}|{round(p_thresh, 5)}|{pathway_db or 'all'}"
+    raw       = (
+        f"{gene_part}|{round(lfc_thresh, 3)}|{round(p_thresh, 5)}"
+        f"|{pathway_db or 'all'}|{active_tab or 'none'}"
+    )
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -72,6 +76,85 @@ def cache_stats() -> dict:
     return {"live_entries": len(live), "total_entries": len(_AI_CACHE),
             "ttl_hours": _CACHE_TTL / 3600}
 
+
+# ── Per-tab interpretation instructions ──────────────────────────────────────
+# Maps tab ID → (human label, what the AI must specifically do).
+# The AI is FORCED to interpret actual dataset values, not describe the tool.
+_TAB_INSTRUCTIONS: dict[str, tuple[str, str]] = {
+    "tab-meta": (
+        "Meta-Score Prioritization",
+        "Interpret the META-SCORE RANKING of the actual genes listed. "
+        "Explain what the top-ranked genes (highest |LFC| × −log10p combined score) "
+        "reveal about the dominant biological process. Identify functional clusters in "
+        "the top 20 ranked genes and explain which genes achieve high rank through "
+        "extreme significance vs. large fold-change.",
+    ),
+    "tab-volcano": (
+        "Volcano & Pathway Analysis",
+        "Interpret the ACTUAL VOLCANO PLOT DATA: comment on the up/down asymmetry "
+        "(ratio of up vs. down genes), name the extreme outliers visible in the top-right "
+        "and top-left quadrants (high |LFC| + very low p-value), and explain what the "
+        "spatial clustering of significant genes implies about the biology. Then explain "
+        "what the enriched pathways listed reveal about the coordinated gene program.",
+    ),
+    "tab-pca": (
+        "3D PCA Projection",
+        "Interpret THIS DATASET'S PCA RESULTS using the variance percentages provided. "
+        "State which fraction of total variance PC1/PC2/PC3 capture. Based on the top "
+        "up/down genes in the dataset, hypothesize what biological signal each PC likely "
+        "represents (e.g., treatment response, cell identity, proliferation). Interpret "
+        "what the sample distribution in 3D space implies about group separation and "
+        "transcriptional coherence.",
+    ),
+    "tab-adv": (
+        "Advanced Analytics — Heatmap & Diagnostics",
+        "Interpret THIS DATASET'S HEATMAP AND DIAGNOSTIC PLOTS. For the heatmap: "
+        "describe what the major co-expression clusters of up/down-regulated genes "
+        "suggest as distinct biological programs. For the MA plot: comment on whether "
+        "the LFC is expression-magnitude dependent (funnel shape = regression to mean). "
+        "For the p-value histogram: is it anti-conservative (spike near 0) suggesting "
+        "true signal, or uniform suggesting noise?",
+    ),
+    "tab-gsea": (
+        "GSEA Pre-Ranked Results",
+        "Interpret THESE SPECIFIC GSEA RESULTS. For each top enriched gene set: state "
+        "whether it is positively or negatively enriched (NES direction), what the "
+        "enrichment score magnitude implies about effect strength, and how the GSEA "
+        "findings confirm or contradict the over-representation results from pathway "
+        "enrichment. Identify any GSEA pathways that were NOT detected by ORA and explain why.",
+    ),
+    "tab-net": (
+        "WGCNA-lite Co-expression Network",
+        "Interpret THIS DATASET'S CO-EXPRESSION NETWORK topology. Identify the top hub "
+        "genes (highest connectivity) from the gene list and explain their biological "
+        "significance. Describe what the major network modules imply about co-regulated "
+        "biological programs. Which gene-gene connections represent the most mechanistically "
+        "important regulatory relationships based on known biology?",
+    ),
+    "tab-drugs": (
+        "FDA Drug Target Landscape",
+        "Interpret the DRUG TARGET OVERLAY for this specific dataset. Name which "
+        "significantly DE genes have FDA-approved drugs, whether their up/down regulation "
+        "makes them inhibitor or activator candidates, and which drug-target interactions "
+        "are most clinically actionable. Identify any cases where a drug target is "
+        "up-regulated (suggesting inhibitor use) or down-regulated (suggesting activator/replacement).",
+    ),
+    "tab-bm": (
+        "Biomarker Priority Score",
+        "Interpret the BIOMARKER PRIORITY SCORES for this dataset. Name the top-ranked "
+        "biomarker candidates and explain whether their high score is driven by statistical "
+        "strength (high LFC/padj), clinical bonuses (FDA drug target / COSMIC tier-1), or both. "
+        "Distinguish novel candidates from already-validated biomarkers. Comment on what "
+        "the score distribution implies about the proportion of clinically vs. statistically "
+        "driven candidates.",
+    ),
+    "tab-insights": (
+        "Auto-Generated Insights",
+        "Provide a CROSS-TAB SYNTHESIS integrating the gene-level, pathway-level, network, "
+        "and clinical (drug/biomarker) findings from this dataset into a single unified "
+        "biological narrative.",
+    ),
+}
 
 # ── Shared system prompt ──────────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
@@ -113,6 +196,8 @@ def _build_deep_analysis_prompt(context_data: dict) -> str:
         jaccard_pairs — list of {a, b, j, shared}
         enr_details   — list of {pathway, z_score, overlap_count} (optional)
         n_up, n_down  — significant gene counts (optional)
+        active_tab    — tab ID string (optional, e.g. 'tab-pca')
+        pca_variance  — PCA variance text (optional, for tab-pca)
         extra         — additional context string (optional)
     """
     top_genes     = context_data.get("top_genes",     [])
@@ -122,6 +207,8 @@ def _build_deep_analysis_prompt(context_data: dict) -> str:
     n_up          = context_data.get("n_up",  0)
     n_down        = context_data.get("n_down", 0)
     extra         = context_data.get("extra", "")
+    active_tab    = context_data.get("active_tab",   "")
+    pca_variance  = context_data.get("pca_variance", "")
 
     # Split genes by direction
     up_genes = [g for g in top_genes if float(g.get("log2FC", 0)) > 0]
@@ -172,9 +259,30 @@ def _build_deep_analysis_prompt(context_data: dict) -> str:
 
     extra_block = f"\nExperiment context: {extra}\n" if extra else ""
 
+    # ── Tab-specific current-view instruction ────────────────────────────────
+    tab_label, tab_instruction = _TAB_INSTRUCTIONS.get(
+        active_tab, ("", "")
+    )
+    current_view_block = ""
+    if tab_label:
+        pca_line = (
+            f"\nPCA Variance (actual data): {pca_variance}\n"
+            if pca_variance and active_tab == "tab-pca"
+            else ""
+        )
+        current_view_block = (
+            f"=== CURRENT VIEW: {tab_label} ===\n"
+            f"MANDATORY INSTRUCTION: {tab_instruction}\n"
+            f"{pca_line}"
+            "RULE: Your response MUST reference specific gene names, numerical "
+            "values, and observed patterns from the data below. Do NOT explain "
+            "what the analysis type is in general — interpret what THIS DATASET shows.\n\n"
+        )
+
     return (
         "Perform a DEEP MULTI-LAYER BIOLOGICAL ANALYSIS of these RNA-seq "
         "differential expression results.\n\n"
+        f"{current_view_block}"
         "=== EXPRESSION DATA ===\n"
         f"{counts_line}"
         f"Top Up-Regulated Genes:\n{up_block}\n\n"
@@ -220,12 +328,22 @@ def _build_chat_prompt(question: str, thread: list[dict], context_data: dict) ->
     """Context-aware follow-up prompt preserving the investigation thread."""
     top_genes    = context_data.get("top_genes",    [])
     top_pathways = context_data.get("top_pathways", [])
+    active_tab   = context_data.get("active_tab",   "")
+    pca_variance = context_data.get("pca_variance", "")
+    n_up         = context_data.get("n_up",  0)
+    n_down       = context_data.get("n_down", 0)
 
     gene_summary = ", ".join(
         f"{g['symbol']} ({float(g['log2FC']):+.2f})"
         for g in top_genes[:12]
     ) or "N/A"
     pathway_summary = "; ".join(top_pathways[:6]) or "N/A"
+
+    # Active view line
+    tab_label = _TAB_INSTRUCTIONS.get(active_tab, ("", ""))[0]
+    view_line = f"  Active view: {tab_label}\n" if tab_label else ""
+    pca_line  = f"  PCA variance: {pca_variance}\n" if pca_variance and active_tab == "tab-pca" else ""
+    counts_line = f"  Significant: {n_up} up, {n_down} down\n" if (n_up or n_down) else ""
 
     # Last 6 exchanges condensed
     thread_block = ""
@@ -239,15 +357,19 @@ def _build_chat_prompt(question: str, thread: list[dict], context_data: dict) ->
     return (
         "You are the Senior Bioinformatician consultant in an ongoing investigation. "
         "Maintain investigative continuity and build on the established analysis.\n\n"
-        f"DATASET CONTEXT:\n"
+        "DATASET CONTEXT:\n"
         f"  Top genes: {gene_summary}\n"
-        f"  Top pathways: {pathway_summary}\n\n"
+        f"  Top pathways: {pathway_summary}\n"
+        f"{counts_line}"
+        f"{view_line}"
+        f"{pca_line}"
+        "\n"
         f"{thread_block}"
         f"FOLLOW-UP QUESTION: {question}\n\n"
-        "Answer with precision and depth. Build on the previous analysis context. "
-        "Cite specific gene symbols, directionality, and pathway evidence. "
-        "If asked to focus on a specific gene cluster or mechanism, provide targeted "
-        "deep analysis with mechanistic reasoning and relevant literature context."
+        "RULE: Answer using specific data from this dataset — gene names, fold-changes, "
+        "p-values, pathway names. Do NOT give generic textbook descriptions. "
+        "If the question is about what a tab/graph 'shows', interpret the ACTUAL VALUES "
+        "and patterns visible in this dataset's data."
     )
 
 
@@ -411,8 +533,9 @@ def get_biological_story_cached(
 
     Returns (summary, powered_by, from_cache).
     """
-    top_genes = context_data.get("top_genes", [])
-    key       = _make_cache_key(top_genes, lfc_thresh, p_thresh, pathway_db)
+    top_genes  = context_data.get("top_genes", [])
+    active_tab = context_data.get("active_tab", "")
+    key        = _make_cache_key(top_genes, lfc_thresh, p_thresh, pathway_db, active_tab)
 
     if force_refresh:
         invalidate_cache_key(key)
