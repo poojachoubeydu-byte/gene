@@ -115,6 +115,7 @@ def generate_pdf_report(
     gene_query: str | None = None,                # Gene Bio-Context search query
     ai_discussion: str | None = None,
     powered_by: str = "",
+    ai_audit_thread: list | None = None,  # Q&A follow-up exchanges from Offcanvas
 ) -> bytes:
     """Return PDF bytes — every graph rendered at 3× scale, raw tables included."""
 
@@ -480,6 +481,53 @@ def generate_pdf_report(
                 "disc", parent=styles["Normal"],
                 fontSize=10, leading=14, spaceAfter=6,
             )))
+
+        elems.append(Spacer(1, 8))
+        hr()
+
+    # ── Appendix: AI Investigation Thread ────────────────────────────────────
+    # Renders the full Q&A drill-down session from the Offcanvas consultant.
+    if ai_audit_thread and any(m.get("content") for m in ai_audit_thread):
+        elems.append(PageBreak())
+        elems.append(Paragraph("Appendix — AI Investigation Thread", h2))
+        elems.append(Paragraph(
+            "Complete record of the Deep-Analysis Research Consultant session "
+            "(follow-up questions and targeted responses).",
+            ParagraphStyle("note_app", parent=styles["Italic"],
+                           textColor=colors.HexColor("#555555"), fontSize=8),
+        ))
+        elems.append(Spacer(1, 10))
+
+        q_style = ParagraphStyle(
+            "q_app", parent=styles["Normal"],
+            fontSize=10, leading=14, textColor=_BLUE,
+            spaceAfter=4, spaceBefore=8,
+            borderPadding=(4, 6, 4, 6),
+            backColor=colors.HexColor("#eaf2fb"),
+        )
+        a_style = ParagraphStyle(
+            "a_app", parent=styles["Normal"],
+            fontSize=10, leading=14,
+            leftIndent=14, spaceAfter=8,
+        )
+
+        q_num = 0
+        for msg in ai_audit_thread:
+            role    = msg.get("role", "")
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+
+            if role == "user":
+                q_num += 1
+                clean = re.sub(r"<[^>]+>", "", content)
+                elems.append(Paragraph(f"Q{q_num}: {clean}", q_style))
+
+            elif role == "assistant":
+                clean = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", content)
+                clean = re.sub(r"\*(.+?)\*",     r"<i>\1</i>", clean)
+                for para in [p.strip() for p in clean.split("\n\n") if p.strip()]:
+                    elems.append(Paragraph(para, a_style))
 
         elems.append(Spacer(1, 8))
         hr()

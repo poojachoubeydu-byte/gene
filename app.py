@@ -526,35 +526,33 @@ SIDEBAR = dbc.Col([
 
         html.Hr(className="my-2"),
 
-        # ── ✨ Global Research Copilot (visible on all 8 tabs) ────────────────
+        # ── 🔬 Deep-Analysis Research Consultant ─────────────────────────────
         html.Div([
             html.Div([
-                html.Span("✨ ", style={"fontSize": 15}),
-                html.Strong("Research Copilot",
+                html.Span("🔬 ", style={"fontSize": 15}),
+                html.Strong("Research Consultant",
                             style={"fontSize": 11, "color": "#1a5276"}),
-                # Badge is pre-populated at server start from os.environ so it
-                # is correct from the very first render — no interval needed.
+                # Badge pre-populated at server start; updated by cb_key_status.
                 html.Div(
                     id="sidebar-ai-badge",
                     children=_startup_badge(),
                     className="ms-1",
                     style={"display": "inline-block"},
                 ),
-            ], className="d-flex align-items-center mb-1"),
-            dcc.Loading(
-                html.Div(
-                    id="sidebar-ai-text",
-                    children=html.Small(
-                        "Switch to any tab to get an AI interpretation.",
-                        className="text-muted",
-                    ),
-                    style={"fontSize": 11, "maxHeight": 200,
-                           "overflowY": "auto", "lineHeight": "1.65"},
-                ),
-                type="dot", color="#1a5276",
+            ], className="d-flex align-items-center mb-2"),
+            dbc.Button(
+                "Deep Results Audit",
+                id="btn-audit",
+                color="primary",
+                size="sm",
+                className="w-100 mb-1",
+                n_clicks=0,
             ),
-            html.Div(id="sidebar-ai-status",
-                     style={"fontSize": 10, "marginTop": 4}),
+            html.Small(
+                "4-layer expert investigation · interactive drill-down",
+                className="text-muted d-block",
+                style={"fontSize": 10, "lineHeight": "1.4"},
+            ),
         ], className="px-1 pb-2",
            style={"background": "rgba(26,82,118,0.06)",
                   "border": "1px solid rgba(26,82,118,0.18)",
@@ -580,6 +578,9 @@ MAIN = dbc.Col([
     dcc.Store(id="cache-gsea",  storage_type="memory"),  # fp when GSEA was last computed
     dcc.Store(id="cache-net",   storage_type="memory"),  # fp when Network was last computed
     dcc.Store(id="cache-bm",    storage_type="memory"),  # fp when Biomarker was last computed
+    # ── Deep-Analysis Consultant stores ──────────────────────────────────────
+    dcc.Store(id="chat-thread-store", storage_type="memory"),  # Q&A investigation thread
+    dcc.Store(id="audit-ctx-store",   storage_type="memory"),  # context snapshot for chat
     # ── Fires once on page load to show AI status badge before any analysis ──
     dcc.Interval(id="key-check-interval", interval=800, max_intervals=1, n_intervals=0),
 
@@ -783,14 +784,15 @@ MAIN = dbc.Col([
             dbc.Row([
                 dbc.Col([
 
-                    # ── AI Research Copilot moved to global sidebar ────────
+                    # ── Deep-Analysis Consultant notice ───────────────────
                     dbc.Alert(
                         [
-                            html.Span("✨ ", style={"fontSize": 14}),
-                            "The ",
-                            html.Strong("Research Copilot"),
-                            " (AI-powered when keys are configured) is in the left sidebar "
-                            "and updates automatically as you switch tabs or click Refresh.",
+                            html.Span("🔬 ", style={"fontSize": 14}),
+                            "Use the ",
+                            html.Strong("Deep Results Audit"),
+                            " button in the left sidebar for a 4-layer AI investigation "
+                            "(Statistical Topology → Pathway Synergy → Cluster Diagnostics "
+                            "→ Literature Synthesis) with an interactive drill-down chat.",
                         ],
                         color="info", className="py-2 px-3 mb-3 small",
                     ),
@@ -810,13 +812,123 @@ MAIN = dbc.Col([
         ]),
 
     ], id="tabs", active_tab="tab-meta"),
-], width=9)
+], width=9, style={"overflowX": "auto"})
 
 
-app.layout = dbc.Container(
-    dbc.Row([SIDEBAR, MAIN], className="g-0"),
-    fluid=True,
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat history renderer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_chat_history(thread: list[dict]) -> list:
+    """Convert a list of {role, content} dicts into styled Dash elements."""
+    if not thread:
+        return [html.P("No follow-up questions yet.",
+                       className="text-muted small fst-italic")]
+    items = []
+    for msg in thread:
+        role    = msg.get("role", "")
+        content = msg.get("content", "").strip()
+        if not content:
+            continue
+        if role == "user":
+            items.append(html.Div([
+                html.Small("You", className="fw-bold text-primary d-block mb-1"),
+                html.P(content, className="mb-0 small"),
+            ], className="bg-light border rounded p-2 mb-2 ms-4",
+               style={"borderLeft": "3px solid #2980b9"}))
+        else:
+            items.append(html.Div([
+                html.Small("Consultant", className="fw-bold text-success d-block mb-1"),
+                dcc.Markdown(content,
+                             style={"fontSize": 12, "lineHeight": "1.65", "margin": 0}),
+            ], className="border rounded p-2 mb-2 me-4 bg-white",
+               style={"borderLeft": "3px solid #27ae60"}))
+    return items
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Offcanvas — Deep-Analysis Research Consultant
+# ─────────────────────────────────────────────────────────────────────────────
+
+_AUDIT_OFFCANVAS = dbc.Offcanvas(
+    id="audit-offcanvas",
+    title=html.Span([
+        "🔬 Deep-Analysis Research Consultant",
+    ], style={"fontWeight": "bold", "fontSize": 15, "color": "#1a5276"}),
+    placement="end",
+    is_open=False,
+    backdrop=False,      # leave the main panel interactive
+    scrollable=True,
+    style={"width": "48%", "minWidth": "520px", "maxWidth": "820px"},
+    children=[
+        # Model attribution badge
+        html.Div(id="audit-model-badge", className="mb-3"),
+
+        # ── Initial deep analysis result ─────────────────────────────────────
+        dbc.Spinner(
+            html.Div(
+                id="audit-analysis-div",
+                children=html.P(
+                    "Click 'Deep Results Audit' in the sidebar to begin "
+                    "the 4-layer investigation.",
+                    className="text-muted small fst-italic",
+                ),
+                style={
+                    "maxHeight": "42vh", "overflowY": "auto",
+                    "lineHeight": "1.75", "fontSize": 13,
+                    "paddingRight": 4,
+                },
+            ),
+            color="primary", type="border",
+        ),
+
+        html.Hr(className="my-3"),
+
+        # ── Investigation thread ─────────────────────────────────────────────
+        html.Div([
+            html.Strong("Investigation Thread",
+                        style={"fontSize": 12, "color": "#1a5276"}),
+            html.Small(" — drill down into specific genes, pathways, or mechanisms",
+                       className="text-muted ms-1", style={"fontSize": 10}),
+        ], className="mb-2"),
+
+        dbc.Spinner(
+            html.Div(
+                id="audit-chat-history",
+                style={
+                    "maxHeight": "26vh", "overflowY": "auto",
+                    "marginBottom": 8, "fontSize": 12,
+                },
+            ),
+            color="secondary", size="sm", type="grow",
+        ),
+
+        # ── Chat input ───────────────────────────────────────────────────────
+        dbc.InputGroup([
+            dbc.Input(
+                id="chat-input",
+                placeholder=(
+                    "e.g. 'Focus on the hemoglobin cluster — "
+                    "oxidative stress or identity loss?'"
+                ),
+                type="text",
+                size="sm",
+                n_submit=0,
+                style={"fontSize": 12},
+            ),
+            dbc.Button(
+                "Send", id="chat-submit",
+                color="primary", size="sm", n_clicks=0,
+            ),
+        ], className="mt-1"),
+    ],
 )
+
+
+app.layout = dbc.Container([
+    dbc.Row([SIDEBAR, MAIN], className="g-0"),
+    _AUDIT_OFFCANVAS,
+], fluid=True, style={"overflowX": "auto"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1768,15 +1880,16 @@ def cb_gene(gene):
     State("p-thresh",      "value"),
     State("sig-store",     "data"),
     # ── Raw session-state extras for Deep Scan data tables ────────────────────
-    State("pca-info",      "children"),   # PCA variance % text
-    State("gene-input",    "value"),      # Gene Bio-Context query string
+    State("pca-info",           "children"),  # PCA variance % text
+    State("gene-input",         "value"),     # Gene Bio-Context query string
+    State("chat-thread-store",  "data"),      # AI investigation thread
     prevent_initial_call=True,
 )
 def cb_pdf(n, vol, pca_f, bubble_f, bar_f, crosstalk_f, heatmap_f,
            ma_f, pval_f, lfc_dist_f, rank_f, gsea_f, net_f,
            drug_scatter_f, drug_donut_f, bm_f, meta_bar_f,
            enr_recs, bm_recs, data_recs, lfc_t, p_t, sig_recs,
-           pca_info, gene_query):
+           pca_info, gene_query, audit_thread):
     if not n:
         return dash.no_update
     try:
@@ -1793,59 +1906,18 @@ def cb_pdf(n, vol, pca_f, bubble_f, bar_f, crosstalk_f, heatmap_f,
 
         insights = generate_insights(df, enr_df, lfc_t, p_t)
 
-        # ── AI Discussion (Deep Scanning) for PDF Discussion section ──────────
+        # ── AI Discussion (4-layer Deep Analysis) for PDF section 15 ────────────
         ai_discussion = None
         ai_powered_by = ""
         try:
             from modules.ai_summary import get_biological_story
-            sig_df = _s2df(sig_recs)
-            if not sig_df.empty:
-                sig_df = sig_df.copy()
-                sig_df["_score"] = (
-                    sig_df["log2FC"].abs()
-                    * -np.log10(sig_df["padj"].clip(lower=1e-300))
+            _pdf_ctx = _build_audit_context(sig_recs, enr_recs, lfc_t, p_t)
+            if _pdf_ctx:
+                _pdf_ctx["extra"] = (
+                    f"Report generated {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC. "
+                    + _pdf_ctx.get("extra", "")
                 )
-                top_genes = (
-                    sig_df.nlargest(10, "_score")[["symbol", "log2FC"]]
-                    .to_dict("records")
-                )
-                top_paths = (
-                    enr_df.head(5)["pathway"].tolist()
-                    if not enr_df.empty and "pathway" in enr_df.columns
-                    else []
-                )
-                # Jaccard pairs for Deep Scanning
-                jaccard_pairs = []
-                if not enr_df.empty and "genes" in enr_df.columns and len(enr_df) >= 2:
-                    gene_sets = []
-                    for _, row in enr_df.head(6).iterrows():
-                        gs = {g.strip().upper()
-                              for g in str(row.get("genes", "")).split(",") if g.strip()}
-                        if gs:
-                            gene_sets.append((str(row.get("pathway", ""))[:35], gs))
-                    for i, (pa, sa) in enumerate(gene_sets):
-                        for pb, sb in gene_sets[i + 1:]:
-                            union = sa | sb
-                            if union:
-                                inter = sa & sb
-                                jaccard_pairs.append({
-                                    "a": pa, "b": pb,
-                                    "j": len(inter) / len(union),
-                                    "shared": len(inter),
-                                })
-                    jaccard_pairs.sort(key=lambda x: -x["j"])
-
-                ctx = {
-                    "top_genes":     top_genes,
-                    "top_pathways":  top_paths,
-                    "jaccard_pairs": jaccard_pairs,
-                    "extra":         (
-                        f"Report generated at "
-                        f"{datetime.now().strftime('%Y-%m-%d %H:%M')} UTC. "
-                        f"{up} up-regulated, {dn} down-regulated significant genes."
-                    ),
-                }
-                ai_discussion, ai_powered_by = get_biological_story(ctx)
+                ai_discussion, ai_powered_by = get_biological_story(_pdf_ctx)
         except Exception as ai_exc:
             log.warning(f"pdf ai discussion: {ai_exc}")
 
@@ -1880,6 +1952,7 @@ def cb_pdf(n, vol, pca_f, bubble_f, bar_f, crosstalk_f, heatmap_f,
             gene_query=gene_query or None,
             ai_discussion=ai_discussion,
             powered_by=ai_powered_by,
+            ai_audit_thread=audit_thread or [],
         )
         fname = f"Apex_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
         return dcc.send_bytes(pdf, fname)
@@ -1947,70 +2020,62 @@ def dl_bm_csv(n, rec):
     return dcc.send_data_frame(pd.DataFrame(rec).to_csv, "biomarker_scores.csv", index=False)
 
 
-# ── Research Copilot: context-aware AI sidebar (fires on tab change OR refresh) ─
-# Outputs to sidebar-ai-text / sidebar-ai-status so the copilot is always
-# visible regardless of the active tab.  Gunicorn workers handle concurrency.
-@app.callback(
-    Output("sidebar-ai-text",   "children"),
-    Output("sidebar-ai-status", "children"),
-    Output("sidebar-ai-badge",  "children", allow_duplicate=True),
-    Input("tabs",             "active_tab"),
-    Input("refresh-tab-btn",  "n_clicks"),
-    State("sig-store",   "data"),
-    State("enr-store",   "data"),
-    State("store",       "data"),
-    State("bm-store",    "data"),
-    State("lfc-thresh",  "value"),
-    State("p-thresh",    "value"),
-    State("pathway-db",  "value"),
-    prevent_initial_call=True,
-)
-def cb_ai_summary(active_tab, _refresh_clicks,
-                  sig_rec, enr_rec, full_rec, bm_rec,
-                  lfc_thresh, p_thresh, pathway_db):
-    from modules.ai_summary import get_biological_story_cached
+# ─────────────────────────────────────────────────────────────────────────────
+# Deep-Analysis Research Consultant callbacks
+# ─────────────────────────────────────────────────────────────────────────────
 
-    sig_df  = _s2df(sig_rec)
-    enr_df  = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
+def _build_audit_context(sig_rec, enr_rec, lfc_thresh, p_thresh) -> dict:
+    """
+    Assemble the rich context_data dict fed to the 4-layer AI prompt.
+    Returns the dict, plus n_up and n_down for banner display.
+    """
+    sig_df = _s2df(sig_rec)
+    enr_df = pd.DataFrame(enr_rec) if enr_rec else pd.DataFrame()
 
     if sig_df.empty:
-        from modules.ai_summary import check_available_model
-        label, color = check_available_model()
-        return (
-            html.Small(
-                "No significant genes at current thresholds. "
-                "Adjust |Log2FC| or p-value cutoffs.",
-                className="text-muted",
-            ),
-            "",
-            dbc.Badge(label, color=color, style={"fontSize": 9}),
-        )
+        return {}
 
-    # ── Shared top-gene / pathway context (meta-score ranked) ─────────────────
     sig_df = sig_df.copy()
     sig_df["_score"] = (
         sig_df["log2FC"].abs()
         * -np.log10(sig_df["padj"].clip(lower=1e-300))
     )
+
+    n_up   = int((sig_df["log2FC"] > 0).sum())
+    n_down = int((sig_df["log2FC"] < 0).sum())
+
+    # Top 15 genes by meta-score (AI gets direction via sign)
     top_genes = (
-        sig_df.nlargest(10, "_score")[["symbol", "log2FC"]].to_dict("records")
+        sig_df.nlargest(15, "_score")[["symbol", "log2FC"]].to_dict("records")
     )
+
+    # Pathway list
     top_paths = (
-        enr_df.head(5)["pathway"].tolist()
+        enr_df.head(10)["pathway"].tolist()
         if not enr_df.empty and "pathway" in enr_df.columns
         else []
     )
 
-    # ── Jaccard gene-overlap pairs (Deep Scanning context) ────────────────────
+    # Enrichment z-score detail
+    enr_details = []
+    if not enr_df.empty:
+        for _, row in enr_df.head(8).iterrows():
+            enr_details.append({
+                "pathway":       str(row.get("pathway", ""))[:50],
+                "z_score":       row.get("activation_z_score",
+                                         row.get("z_score", None)),
+                "overlap_count": row.get("overlap_count", "?"),
+            })
+
+    # Jaccard gene-overlap pairs
     jaccard_pairs = []
     if not enr_df.empty and "genes" in enr_df.columns and len(enr_df) >= 2:
-        top_enr = enr_df.head(6)
         gene_sets = []
-        for _, row in top_enr.iterrows():
-            genes_str = str(row.get("genes", ""))
-            gene_set  = {g.strip().upper() for g in genes_str.split(",") if g.strip()}
-            if gene_set:
-                gene_sets.append((str(row.get("pathway", ""))[:35], gene_set))
+        for _, row in enr_df.head(6).iterrows():
+            gs = {g.strip().upper()
+                  for g in str(row.get("genes", "")).split(",") if g.strip()}
+            if gs:
+                gene_sets.append((str(row.get("pathway", ""))[:35], gs))
         for i, (pa, sa) in enumerate(gene_sets):
             for pb, sb in gene_sets[i + 1:]:
                 union = sa | sb
@@ -2023,114 +2088,140 @@ def cb_ai_summary(active_tab, _refresh_clicks,
                     })
         jaccard_pairs.sort(key=lambda x: -x["j"])
 
-    # ── Tab-specific extra context string ─────────────────────────────────────
-    extra_ctx = ""
-    if active_tab == "tab-meta":
-        if top_genes:
-            g0 = top_genes[0]
-            extra_ctx = (
-                f"Top meta-score gene: {g0['symbol']} "
-                f"(Log2FC {float(g0['log2FC']):+.2f}). "
-                f"{len(sig_df)} significant genes ranked."
+    # Drug-target count context
+    extra_ctx = f"{n_up} up-regulated, {n_down} down-regulated significant genes."
+    try:
+        from data.gene_annotations import DRUG_GENE_INTERACTIONS
+        sig_syms  = sig_df["symbol"].str.upper().tolist()
+        druggable = [g for g in sig_syms if g in DRUG_GENE_INTERACTIONS]
+        if druggable:
+            extra_ctx += (
+                f" {len(druggable)} genes have FDA-approved drug overlays: "
+                f"{', '.join(druggable[:5])}."
             )
-    elif active_tab == "tab-volcano":
-        n_up = int((sig_df["log2FC"] > 0).sum())
-        n_dn = int((sig_df["log2FC"] < 0).sum())
-        extra_ctx = (
-            f"{n_up} up-regulated and {n_dn} down-regulated significant genes. "
-            f"{len(top_paths)} enriched pathways detected."
-        )
-    elif active_tab == "tab-pca":
-        extra_ctx = (
-            f"3D PCA: {len(sig_df)} significant genes used as features. "
-            "Samples plotted as Group A (control) vs Group B (treatment)."
-        )
-    elif active_tab == "tab-adv":
-        extra_ctx = (
-            f"Heatmap: top {min(100, len(sig_df))} genes, row-wise Z-score, "
-            "Blue→White→Red colorscale (Red = high expression)."
-        )
-    elif active_tab == "tab-gsea":
-        extra_ctx = (
-            f"GSEA pre-ranked on {len(sig_df)} significant genes. "
-            + (f"Top GSEA pathway: {top_paths[0]}." if top_paths else "")
-        )
-    elif active_tab == "tab-net":
-        extra_ctx = (
-            f"Co-expression network (WGCNA-lite): {len(sig_df)} genes, "
-            "Top-10% strongest correlations, force-directed layout."
-        )
-    elif active_tab == "tab-drugs":
-        try:
-            from data.gene_annotations import DRUG_GENE_INTERACTIONS
-            sig_syms  = sig_df["symbol"].str.upper().tolist()
-            druggable = [g for g in sig_syms if g in DRUG_GENE_INTERACTIONS]
-            extra_ctx = (
-                f"{len(druggable)} of {len(sig_syms)} significant genes "
-                "have FDA-approved drugs. "
-                + (f"Key targets: {', '.join(druggable[:5])}." if druggable else "")
-            )
-        except Exception:
-            extra_ctx = f"{len(sig_df)} significant genes mapped to drug target database."
-    elif active_tab == "tab-bm":
-        extra_ctx = (
-            "Biomarker Priority Score = Meta-Score + clinical bonuses "
-            "(+15 FDA drug, +10 COSMIC Tier-1 cancer gene, +5 established biomarker)."
-        )
-    # tab-insights / fallback: no extra context needed
+    except Exception:
+        pass
 
-    context_data = {
+    return {
         "top_genes":     top_genes,
         "top_pathways":  top_paths,
+        "jaccard_pairs": jaccard_pairs,
+        "enr_details":   enr_details,
+        "n_up":          n_up,
+        "n_down":        n_down,
         "extra":         extra_ctx,
-        "jaccard_pairs": jaccard_pairs,   # Deep Scanning gene-overlap context
     }
 
-    # ── Determine whether this is a forced refresh ────────────────────────────
-    force_refresh = (ctx.triggered_id == "refresh-tab-btn")
+
+# ── Open Offcanvas + run deep analysis ────────────────────────────────────────
+@app.callback(
+    Output("audit-offcanvas",    "is_open"),
+    Output("audit-analysis-div", "children"),
+    Output("audit-model-badge",  "children"),
+    Output("audit-ctx-store",    "data"),
+    Output("chat-thread-store",  "data"),   # reset thread on new audit
+    Input("btn-audit",           "n_clicks"),
+    State("sig-store",   "data"),
+    State("enr-store",   "data"),
+    State("lfc-thresh",  "value"),
+    State("p-thresh",    "value"),
+    State("pathway-db",  "value"),
+    prevent_initial_call=True,
+)
+def cb_open_audit(n_clicks, sig_rec, enr_rec, lfc_thresh, p_thresh, pathway_db):
+    from modules.ai_summary import get_biological_story_cached, check_available_model
+
+    context_data = _build_audit_context(sig_rec, enr_rec, lfc_thresh, p_thresh)
+
+    # Badge
+    badge_label, badge_color = check_available_model()
+    badge = dbc.Badge(badge_label, color=badge_color, className="me-2",
+                      style={"fontSize": 10})
+
+    if not context_data:
+        body = dbc.Alert(
+            "No significant genes at current thresholds. "
+            "Adjust |Log2FC| or p-value cutoffs and try again.",
+            color="warning", className="small",
+        )
+        return True, body, badge, {}, []
 
     try:
         summary, powered_by, from_cache = get_biological_story_cached(
             context_data,
-            lfc_thresh  = float(lfc_thresh  or 1.0),
-            p_thresh    = float(p_thresh    or 0.05),
-            pathway_db  = str(pathway_db   or "all"),
-            force_refresh = force_refresh,
-            active_tab  = active_tab,
+            lfc_thresh    = float(lfc_thresh  or 1.0),
+            p_thresh      = float(p_thresh    or 0.05),
+            pathway_db    = str(pathway_db    or "all"),
+            force_refresh = False,
         )
     except Exception as exc:
-        log.error(f"cb_ai_summary: {exc}")
-        summary, powered_by, from_cache = (
-            f"AI interpretation unavailable: {exc}", "", False,
-        )
+        log.error(f"cb_open_audit: {exc}")
+        summary    = f"Analysis error: {exc}"
+        powered_by = ""
+        from_cache = False
 
-    # ── Badge always reflects KEY AVAILABILITY, not last call result ──────────
-    from modules.ai_summary import check_available_model
-    badge_label, badge_color = check_available_model()
-    badge = dbc.Badge(badge_label, color=badge_color, style={"fontSize": 9})
-
-    # ── Status line: model + optional cache note ──────────────────────────────
-    status_parts = []
+    # Attribution line
+    attr_parts = []
     if powered_by and "Rule" not in powered_by and "Offline" not in powered_by:
-        status_parts.append(html.Span(["⚡ Powered by ", html.B(powered_by)]))
+        attr_parts.append(html.Span(["⚡ ", html.B(powered_by)],
+                                    className="me-2 text-success small"))
     elif powered_by:
-        status_parts.append(html.Span(powered_by, className="text-muted"))
-
+        attr_parts.append(html.Span(powered_by,
+                                    className="me-2 text-muted small"))
     if from_cache:
-        status_parts.append(
-            html.Span(
-                " · 📦 Retrieved from local cache (24 h TTL)",
-                style={"fontSize": 9, "color": "#888", "marginLeft": 4},
-            )
-        )
+        attr_parts.append(html.Span(
+            "📦 cached (24 h TTL)",
+            style={"fontSize": 10, "color": "#888"},
+        ))
+    badge_row = html.Div([badge] + attr_parts, className="d-flex align-items-center")
 
-    status = html.Span(status_parts) if status_parts else html.Span("")
-
-    return (
-        dcc.Markdown(summary, style={"fontSize": 11, "lineHeight": "1.65"}),
-        status,
-        badge,
+    analysis_div = dcc.Markdown(
+        summary,
+        style={"fontSize": 13, "lineHeight": "1.75"},
     )
+
+    return True, analysis_div, badge_row, context_data, []
+
+
+# ── Follow-up chat ─────────────────────────────────────────────────────────────
+@app.callback(
+    Output("chat-thread-store",  "data",  allow_duplicate=True),
+    Output("audit-chat-history", "children"),
+    Output("chat-input",         "value"),
+    Input("chat-submit",         "n_clicks"),
+    Input("chat-input",          "n_submit"),
+    State("chat-input",          "value"),
+    State("chat-thread-store",   "data"),
+    State("audit-ctx-store",     "data"),
+    prevent_initial_call=True,
+)
+def cb_chat_followup(n_clicks, n_submit, question, thread, context_data):
+    from modules.ai_summary import get_consultation_response
+
+    thread  = thread or []
+    question = (question or "").strip()
+
+    if not question:
+        return thread, _render_chat_history(thread), ""
+
+    context_data = context_data or {}
+
+    # Append user turn
+    thread = thread + [{"role": "user", "content": question}]
+
+    try:
+        response, powered_by = get_consultation_response(
+            question, thread[:-1], context_data,
+        )
+    except Exception as exc:
+        log.error(f"cb_chat_followup: {exc}")
+        response   = f"Error generating response: {exc}"
+        powered_by = ""
+
+    # Append assistant turn
+    thread = thread + [{"role": "assistant", "content": response}]
+
+    return thread, _render_chat_history(thread), ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

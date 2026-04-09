@@ -1,14 +1,21 @@
 """
-AI Summary Module — Apex Bioinformatics Platform v4.0
-======================================================
+AI Summary Module — Apex Bioinformatics Platform v5.0 (Deep-Analysis Consultant)
+=================================================================================
 Tiered waterfall: Gemini 2.5 Flash (primary) → Groq Llama 3 (secondary) → Rule-Based.
 
-get_biological_story(context_data) always returns a result — never an empty
-box, even with no API keys or no internet connection.
+Public API
+----------
+get_biological_story_cached(context_data, ...)   → (summary, powered_by, from_cache)
+    4-layer deep analysis with SHA-256 server-side cache (24 h TTL).
 
-API keys (set in .env file):
-    GEMINI_API_KEY     — https://aistudio.google.com/app       (free, no card)
-    GROQ_API_KEY       — https://console.groq.com              (free, no card)
+get_consultation_response(question, thread, context_data)  → (response, powered_by)
+    Interactive follow-up — no caching, always fresh.
+
+check_available_model()                          → (label, badge_color)
+    Env-var check only — no network calls.
+
+invalidate_cache_key(key)                        → None
+    Called on forced Refresh to bypass cached result.
 """
 
 import hashlib
@@ -20,11 +27,11 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Server-side AI response cache — keyed by (genes, lfc, pval, db)
-# TTL = 24 hours.  Thread-safe enough for single-process Dash / Gunicorn
-# because Python's GIL protects dict reads/writes.
+# TTL = 24 hours.  Thread-safe for single-process Dash / Gunicorn because
+# Python's GIL protects dict reads/writes.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CACHE_TTL: int = 24 * 3600                          # seconds
+_CACHE_TTL: int = 24 * 3600
 _AI_CACHE:  dict[str, tuple[float, str, str]] = {}   # key → (ts, summary, powered_by)
 
 
@@ -34,14 +41,12 @@ def _make_cache_key(
     p_thresh: float,
     pathway_db: str,
 ) -> str:
-    """Return a stable SHA-256 hex key for the given query parameters."""
-    gene_part  = ",".join(sorted(g["symbol"].upper() for g in top_genes))
-    raw        = f"{gene_part}|{round(lfc_thresh, 3)}|{round(p_thresh, 5)}|{pathway_db or 'all'}"
+    gene_part = ",".join(sorted(g["symbol"].upper() for g in top_genes))
+    raw       = f"{gene_part}|{round(lfc_thresh, 3)}|{round(p_thresh, 5)}|{pathway_db or 'all'}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def _cache_get(key: str) -> tuple[str, str] | None:
-    """Return (summary, powered_by) if cached and not expired, else None."""
     entry = _AI_CACHE.get(key)
     if entry is None:
         return None
@@ -62,40 +67,30 @@ def invalidate_cache_key(key: str) -> None:
 
 
 def cache_stats() -> dict:
-    """Diagnostic helper — returns count and oldest/newest timestamps."""
-    now = time.time()
+    now  = time.time()
     live = {k: v for k, v in _AI_CACHE.items() if now - v[0] <= _CACHE_TTL}
-    return {
-        "live_entries": len(live),
-        "total_entries": len(_AI_CACHE),
-        "ttl_hours": _CACHE_TTL / 3600,
-    }
+    return {"live_entries": len(live), "total_entries": len(_AI_CACHE),
+            "ttl_hours": _CACHE_TTL / 3600}
+
 
 # ── Shared system prompt ──────────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
     "You are a Senior Bioinformatician with 20 years of experience in oncology "
     "and systems biology. You interpret RNA-seq differential expression results "
-    "for a research audience. Be precise, use correct HGNC gene nomenclature, "
-    "and ground every statement strictly in the data provided."
+    "for a research audience. Be rigorous, precise, and use correct HGNC gene "
+    "nomenclature. Ground every statement strictly in the data provided."
 )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public status helper — called on page load for the startup badge
+# Public status helper
 # ─────────────────────────────────────────────────────────────────────────────
 
 def check_available_model() -> tuple[str, str]:
     """
     Returns (label, badge_color) for the first detected API key.
-    Does NOT make any network calls — purely an env-var check.
-
-    Priority: Gemini → Groq → Offline (matches get_biological_story waterfall).
-
-    Returns
-    -------
-    (label, badge_color)
-        label       — short model name for the badge
-        badge_color — Bootstrap color ('success', 'info', 'secondary')
+    No network calls — purely an env-var check.
+    Priority: Gemini → Groq → Offline.
     """
     if os.environ.get("GEMINI_API_KEY", "").strip():
         return "Online · Gemini 2.5 Flash", "success"
@@ -105,61 +100,162 @@ def check_available_model() -> tuple[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prompt builder — accepts optional jaccard_pairs for Deep Scanning
+# Prompt builders
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_prompt(context_data: dict) -> str:
+def _build_deep_analysis_prompt(context_data: dict) -> str:
+    """
+    4-layer Expert Investigator prompt.
+
+    context_data keys used:
+        top_genes     — list of {symbol, log2FC}
+        top_pathways  — list of pathway name strings
+        jaccard_pairs — list of {a, b, j, shared}
+        enr_details   — list of {pathway, z_score, overlap_count} (optional)
+        n_up, n_down  — significant gene counts (optional)
+        extra         — additional context string (optional)
+    """
     top_genes     = context_data.get("top_genes",     [])
     top_pathways  = context_data.get("top_pathways",  [])
-    extra         = context_data.get("extra",         "")
     jaccard_pairs = context_data.get("jaccard_pairs", [])
+    enr_details   = context_data.get("enr_details",   [])
+    n_up          = context_data.get("n_up",  0)
+    n_down        = context_data.get("n_down", 0)
+    extra         = context_data.get("extra", "")
 
-    gene_block = "\n".join(
-        f"  {g['symbol']}: Log2FC = {float(g['log2FC']):+.3f}"
-        for g in top_genes[:10]
-    ) or "  No significant genes."
+    # Split genes by direction
+    up_genes = [g for g in top_genes if float(g.get("log2FC", 0)) > 0]
+    dn_genes = [g for g in top_genes if float(g.get("log2FC", 0)) < 0]
+
+    up_block = "\n".join(
+        f"  ↑ {g['symbol']}: Log2FC = {float(g['log2FC']):+.3f}"
+        for g in up_genes[:8]
+    ) or "  (none in top selection)"
+
+    dn_block = "\n".join(
+        f"  ↓ {g['symbol']}: Log2FC = {float(g['log2FC']):+.3f}"
+        for g in dn_genes[:8]
+    ) or "  (none in top selection)"
 
     pathway_block = (
-        "\n".join(f"  - {p}" for p in top_pathways[:5])
+        "\n".join(f"  {i+1}. {p}" for i, p in enumerate(top_pathways[:10]))
         or "  No significantly enriched pathways detected."
     )
 
-    # ── Jaccard overlap block (Deep Scanning) ─────────────────────────────────
+    # Enrichment z-score detail
+    enr_detail_block = ""
+    if enr_details:
+        lines = ["Pathway Enrichment Details (activation z-score, overlap genes):"]
+        for d in enr_details[:8]:
+            z = d.get("z_score", None)
+            z_str = f"{float(z):+.2f}" if isinstance(z, (int, float)) else "N/A"
+            lines.append(
+                f"  {str(d.get('pathway',''))[:45]}: z={z_str}, "
+                f"overlap={d.get('overlap_count','?')}"
+            )
+        enr_detail_block = "\n" + "\n".join(lines) + "\n"
+
+    # Jaccard crosstalk
     jaccard_block = ""
     if jaccard_pairs:
-        lines = ["Jaccard Gene Overlap Between Top Pathways (shared gene burden):"]
-        for pair in jaccard_pairs[:5]:
+        lines = ["Pathway Gene Overlap (Jaccard Index):"]
+        for pair in jaccard_pairs[:6]:
             lines.append(
                 f"  {pair['a']} ↔ {pair['b']}: "
                 f"J={pair['j']:.2f} ({pair['shared']} shared genes)"
             )
         jaccard_block = "\n" + "\n".join(lines) + "\n"
 
-    extra_block = f"\nAdditional context: {extra}\n" if extra else ""
+    counts_line = ""
+    if n_up or n_down:
+        counts_line = f"Total significant: {n_up} up-regulated, {n_down} down-regulated.\n"
+
+    extra_block = f"\nExperiment context: {extra}\n" if extra else ""
 
     return (
-        "Interpret these RNA-seq differential expression results:\n\n"
-        f"Top Significant Genes (ranked by |LFC| × −log10p meta-score):\n"
-        f"{gene_block}\n\n"
-        f"Top Enriched Pathways:\n"
-        f"{pathway_block}\n"
+        "Perform a DEEP MULTI-LAYER BIOLOGICAL ANALYSIS of these RNA-seq "
+        "differential expression results.\n\n"
+        "=== EXPRESSION DATA ===\n"
+        f"{counts_line}"
+        f"Top Up-Regulated Genes:\n{up_block}\n\n"
+        f"Top Down-Regulated Genes:\n{dn_block}\n\n"
+        f"Top Enriched Pathways:\n{pathway_block}\n"
+        f"{enr_detail_block}"
         f"{jaccard_block}"
         f"{extra_block}\n"
-        "Write a concise 3–5 sentence biological interpretation. Cover:\n"
-        "1. The most likely biological process or disease context.\n"
-        "2. Whether the pattern indicates pathway activation or inhibition.\n"
-        "3. Any clinically relevant genes or potential drug targets.\n"
-        + ("4. What the pathway gene overlap pattern implies about crosstalk "
-           "or co-regulation.\n" if jaccard_pairs else "")
-        + "\nUse precise scientific language. Stay grounded in the data."
+        "=== FOUR-LAYER INVESTIGATION ===\n\n"
+        "**LAYER 1 — Statistical Topology:**\n"
+        "Analyze the expression landscape holistically. What biological 'story' do the "
+        "top up- and down-regulated genes tell? Identify lineage-specific signatures "
+        "(erythroid, immune, epithelial, stem cell), stress-response motifs, or oncogenic "
+        "activation patterns. Note any asymmetry between the up/down arms and whether the "
+        "magnitude distribution suggests a strong driver event or a diffuse regulatory shift.\n\n"
+        "**LAYER 2 — Pathway Synergy:**\n"
+        "Cross-reference enriched pathways with gene-level directional data. Identify where "
+        "multiple pathways converge (co-activation or co-repression) and where enrichment "
+        "conflicts with gene direction (e.g., a pathway is enriched but its key members are "
+        "suppressed — indicating a compensatory or paradoxical response). If z-scores are "
+        "provided, interpret each activation state explicitly. Cite specific gene–pathway "
+        "relationships and flag any activation/inhibition conflicts.\n\n"
+        "**LAYER 3 — Outlier & Cluster Diagnostics:**\n"
+        "Identify genes that do not fit the dominant expression pattern and hypothesize their "
+        "biological role (e.g., feedback inhibitors, bystander effects, alternative splicing "
+        "artefacts). Comment on what the Jaccard pathway overlaps imply about co-regulation "
+        "modularity — are these tightly linked responses or parallel independent cascades? "
+        "What does the implied cluster structure suggest about transcriptional coherence and "
+        "the number of distinct biological programs active simultaneously?\n\n"
+        "**LAYER 4 — Literature Synthesis & Actionable Hypotheses:**\n"
+        "Synthesize a specific disease or biological-context hypothesis. Name known co-activation "
+        "or co-repression signatures that match this pattern (e.g., 'JAK2/VEGFA co-activation is "
+        "a documented resistance mechanism in myeloproliferative neoplasms'). State the most "
+        "likely disease context with supporting logic. List the top 2–3 most actionable drug "
+        "target candidates, specifying whether they are direct DE targets or upstream regulators, "
+        "and note any existing approved drugs or active clinical trials.\n\n"
+        "Minimum 350 words. Each layer MUST be headed exactly as shown. Use HGNC nomenclature "
+        "throughout. Cite gene symbols and pathway names in every layer."
+    )
+
+
+def _build_chat_prompt(question: str, thread: list[dict], context_data: dict) -> str:
+    """Context-aware follow-up prompt preserving the investigation thread."""
+    top_genes    = context_data.get("top_genes",    [])
+    top_pathways = context_data.get("top_pathways", [])
+
+    gene_summary = ", ".join(
+        f"{g['symbol']} ({float(g['log2FC']):+.2f})"
+        for g in top_genes[:12]
+    ) or "N/A"
+    pathway_summary = "; ".join(top_pathways[:6]) or "N/A"
+
+    # Last 6 exchanges condensed
+    thread_block = ""
+    if thread:
+        parts = []
+        for msg in thread[-6:]:
+            tag   = "Q" if msg.get("role") == "user" else "A"
+            parts.append(f"[{tag}]: {str(msg.get('content',''))[:450]}")
+        thread_block = "INVESTIGATION THREAD (recent):\n" + "\n".join(parts) + "\n\n"
+
+    return (
+        "You are the Senior Bioinformatician consultant in an ongoing investigation. "
+        "Maintain investigative continuity and build on the established analysis.\n\n"
+        f"DATASET CONTEXT:\n"
+        f"  Top genes: {gene_summary}\n"
+        f"  Top pathways: {pathway_summary}\n\n"
+        f"{thread_block}"
+        f"FOLLOW-UP QUESTION: {question}\n\n"
+        "Answer with precision and depth. Build on the previous analysis context. "
+        "Cite specific gene symbols, directionality, and pathway evidence. "
+        "If asked to focus on a specific gene cluster or mechanism, provide targeted "
+        "deep analysis with mechanistic reasoning and relevant literature context."
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tier 1 — Google Gemini 2.5 Flash (primary)
+# Tier 1 — Google Gemini 2.5 Flash
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_gemini(prompt: str) -> str:
+def _call_gemini(prompt: str, max_tokens: int = 2500) -> str:
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set")
@@ -171,16 +267,16 @@ def _call_gemini(prompt: str) -> str:
     )
     resp = model.generate_content(
         prompt,
-        generation_config={"max_output_tokens": 600, "temperature": 0.3},
+        generation_config={"max_output_tokens": max_tokens, "temperature": 0.3},
     )
     return resp.text.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tier 2 — Groq Llama 3 70B (secondary fallback)
+# Tier 2 — Groq Llama 3 70B
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_groq(prompt: str) -> str:
+def _call_groq(prompt: str, max_tokens: int = 2500) -> str:
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         raise ValueError("GROQ_API_KEY not set")
@@ -192,19 +288,21 @@ def _call_groq(prompt: str) -> str:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user",   "content": prompt},
         ],
-        max_tokens=600,
+        max_tokens=max_tokens,
         temperature=0.3,
     )
     return resp.choices[0].message.content.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tier 3 — Rule-Based (always works, no internet required)
+# Tier 3 — Rule-Based (always works)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _rule_based_summary(context_data: dict) -> str:
     top_genes    = context_data.get("top_genes",    [])
     top_pathways = context_data.get("top_pathways", [])
+    n_up         = context_data.get("n_up",  0)
+    n_down       = context_data.get("n_down", 0)
 
     if not top_genes:
         return (
@@ -219,77 +317,84 @@ def _rule_based_summary(context_data: dict) -> str:
     down      = [g["symbol"] for g in top_genes if float(g.get("log2FC", 0)) < 0]
 
     lines = [
-        f"**Summary (Rule-Based):** The highest-ranked gene is **{top['symbol']}** "
+        f"**LAYER 1 — Statistical Topology (Rule-Based):** "
+        f"The highest-ranked gene is **{top['symbol']}** "
         f"(Log2FC = {lfc_val:+.2f}, {direction})."
     ]
+    if n_up or n_down:
+        lines.append(f"Dataset contains {n_up} up-regulated and {n_down} down-regulated significant genes.")
     if up:
-        lines.append(f"Up-regulated genes include: {', '.join(up[:5])}.")
+        lines.append(f"Top up-regulated genes include: {', '.join(up[:5])}.")
     if down:
-        lines.append(f"Down-regulated genes include: {', '.join(down[:5])}.")
+        lines.append(f"Top down-regulated genes include: {', '.join(down[:5])}.")
+
+    lines.append(
+        "\n**LAYER 2 — Pathway Synergy (Rule-Based):** "
+    )
     if top_pathways:
-        extra = (f" and {len(top_pathways) - 1} other pathway(s)"
+        extra = (f" and {len(top_pathways) - 1} additional pathway(s)"
                  if len(top_pathways) > 1 else "")
         lines.append(
-            f"Statistical enrichment detected in **{top_pathways[0]}**{extra}."
+            f"Statistical enrichment detected in **{top_pathways[0]}**{extra}. "
+            "Configure an AI API key for activation z-score and synergy analysis."
         )
+    else:
+        lines.append("No enriched pathways detected at current thresholds.")
+
+    lines.append(
+        "\n**LAYER 3 — Cluster Diagnostics (Rule-Based):** "
+        "Configure GEMINI_API_KEY or GROQ_API_KEY for outlier identification and "
+        "cluster coherence analysis."
+    )
+    lines.append(
+        "\n**LAYER 4 — Literature Synthesis (Rule-Based):** "
+        "AI-powered literature synthesis unavailable offline. "
+        "Add an API key in your .env file and click Refresh."
+    )
 
     return " ".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public API
+# Public API — Deep Analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_biological_story(context_data: dict, **kwargs) -> tuple[str, str]:
     """
     Waterfall: Gemini 2.5 Flash → Groq Llama 3 → Rule-Based.
+    Uses the 4-layer Expert Investigator prompt.
 
-    Parameters
-    ----------
-    context_data : dict with keys:
-        'top_genes'     — list of {'symbol': str, 'log2FC': float}
-        'top_pathways'  — list of pathway name strings
-        'jaccard_pairs' — list of {'a', 'b', 'j', 'shared'} dicts (optional)
-        'extra'         — additional context string (optional)
-
-    Returns
-    -------
-    (summary, powered_by)
-        summary    — markdown-formatted biological interpretation
-        powered_by — short label for the status badge in the UI
+    Returns (summary, powered_by).
     """
     _gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     _groq_key   = os.environ.get("GROQ_API_KEY",   "").strip()
     print(
-        f"[AI Copilot] Keys — GEMINI: {'✅' if _gemini_key else '❌'}  "
+        f"[AI Consultant] Keys — GEMINI: {'✅' if _gemini_key else '❌'}  "
         f"GROQ: {'✅' if _groq_key else '❌'}"
     )
 
-    prompt = _build_prompt(context_data)
+    prompt = _build_deep_analysis_prompt(context_data)
 
-    # Tier 1 — Gemini 2.5 Flash
     try:
-        text = _call_gemini(prompt)
-        log.info("AI summary: Gemini 2.5 Flash succeeded")
-        print("[AI Copilot] Gemini SUCCESS")
+        text = _call_gemini(prompt, max_tokens=2500)
+        log.info("AI: Gemini 2.5 Flash succeeded")
+        print("[AI Consultant] Gemini SUCCESS")
         return text, "Google · Gemini 2.5 Flash"
     except Exception as exc:
-        log.warning(f"AI summary: Gemini failed — {exc}")
-        print(f"[AI Copilot] Gemini FAILED — {type(exc).__name__}: {exc}")
+        log.warning(f"AI: Gemini failed — {exc}")
+        print(f"[AI Consultant] Gemini FAILED — {type(exc).__name__}: {exc}")
 
-    # Tier 2 — Groq Llama 3
     try:
-        text = _call_groq(prompt)
-        log.info("AI summary: Groq (Llama 3 70B) succeeded")
-        print("[AI Copilot] Groq SUCCESS")
+        text = _call_groq(prompt, max_tokens=2500)
+        log.info("AI: Groq (Llama 3 70B) succeeded")
+        print("[AI Consultant] Groq SUCCESS")
         return text, "Groq · Llama 3 70B"
     except Exception as exc:
-        log.warning(f"AI summary: Groq failed — {exc}")
-        print(f"[AI Copilot] Groq FAILED — {type(exc).__name__}: {exc}")
+        log.warning(f"AI: Groq failed — {exc}")
+        print(f"[AI Consultant] Groq FAILED — {type(exc).__name__}: {exc}")
 
-    # Tier 3 — Rule-Based (guaranteed)
-    print("[AI Copilot] Falling back to Rule-Based")
-    log.info("AI summary: using rule-based fallback")
+    print("[AI Consultant] Falling back to Rule-Based")
+    log.info("AI: using rule-based fallback")
     return _rule_based_summary(context_data), "Rule-Based · Offline"
 
 
@@ -304,19 +409,7 @@ def get_biological_story_cached(
     """
     Cache-aware wrapper around get_biological_story.
 
-    Parameters
-    ----------
-    context_data  : same dict accepted by get_biological_story
-    lfc_thresh    : |Log2FC| cutoff used to build sig-store
-    p_thresh      : adjusted p-value cutoff used to build sig-store
-    pathway_db    : pathway database selection ('all', 'kegg', 'go', …)
-    force_refresh : when True the cached entry is discarded and a fresh
-                    API call is made regardless of TTL
-
-    Returns
-    -------
-    (summary, powered_by, from_cache)
-        from_cache — True when the result was served from the local cache
+    Returns (summary, powered_by, from_cache).
     """
     top_genes = context_data.get("top_genes", [])
     key       = _make_cache_key(top_genes, lfc_thresh, p_thresh, pathway_db)
@@ -328,12 +421,66 @@ def get_biological_story_cached(
         cached = _cache_get(key)
         if cached is not None:
             log.info(f"AI cache: HIT — key {key[:12]}…")
-            print(f"[AI Copilot] Cache HIT — serving from local cache (key {key[:12]}…)")
+            print(f"[AI Consultant] Cache HIT (key {key[:12]}…)")
             summary, powered_by = cached
             return summary, powered_by, True
 
     log.info(f"AI cache: MISS — calling live API (key {key[:12]}…)")
-    print(f"[AI Copilot] Cache MISS — calling live API (key {key[:12]}…)")
+    print(f"[AI Consultant] Cache MISS — calling live API (key {key[:12]}…)")
     summary, powered_by = get_biological_story(context_data, **kwargs)
     _cache_set(key, summary, powered_by)
     return summary, powered_by, False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API — Interactive Consultation (no caching)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_consultation_response(
+    question: str,
+    thread: list[dict],
+    context_data: dict,
+) -> tuple[str, str]:
+    """
+    Handle a follow-up question in the investigation thread.
+    No caching — always a fresh call so the model sees the full thread.
+
+    Parameters
+    ----------
+    question     : the user's follow-up question
+    thread       : list of {role, content} dicts (prior exchanges)
+    context_data : same dict accepted by get_biological_story
+
+    Returns (response, powered_by).
+    """
+    if not question or not question.strip():
+        return (
+            "Please enter a question to continue the investigation.",
+            "Rule-Based · Offline",
+        )
+
+    prompt = _build_chat_prompt(question.strip(), thread, context_data)
+
+    # Tier 1 — Gemini
+    try:
+        text = _call_gemini(prompt, max_tokens=1500)
+        log.info("Consultation: Gemini 2.5 Flash succeeded")
+        return text, "Google · Gemini 2.5 Flash"
+    except Exception as exc:
+        log.warning(f"Consultation: Gemini failed — {exc}")
+
+    # Tier 2 — Groq
+    try:
+        text = _call_groq(prompt, max_tokens=1500)
+        log.info("Consultation: Groq (Llama 3 70B) succeeded")
+        return text, "Groq · Llama 3 70B"
+    except Exception as exc:
+        log.warning(f"Consultation: Groq failed — {exc}")
+
+    # Offline fallback
+    return (
+        f"No AI engine available. Your question was: *'{question}'*. "
+        "Please configure GEMINI_API_KEY or GROQ_API_KEY in your .env file, "
+        "then click Refresh.",
+        "Rule-Based · Offline",
+    )
