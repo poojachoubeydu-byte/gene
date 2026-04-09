@@ -37,6 +37,12 @@ def blank(msg: str = "") -> go.Figure:
 
 def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                         lfc_thresh=1.0, p_thresh=0.05, filtered_genes=None):
+    """
+    Volcano plot — shows ONLY significant genes (those passing both lfc_thresh
+    and p_thresh).  Cancer-gene and FDA drug-target overlays are retained.
+    Non-significant gray cloud is removed to keep focus on actionable hits.
+    Threshold dashed lines remain as reference for the significance boundary.
+    """
     from data.gene_annotations import CANCER_GENE_CENSUS, DRUG_GENE_INTERACTIONS
 
     if isinstance(df, list):
@@ -47,28 +53,36 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
     df = df.copy()
     df["_nlp"] = -np.log10(df[padj_col].clip(lower=1e-300))
 
-    up = (df[logfc_col] >  lfc_thresh) & (df[padj_col] < p_thresh)
-    dn = (df[logfc_col] < -lfc_thresh) & (df[padj_col] < p_thresh)
+    # Significance masks on the FULL dataset (used for overlay lookups)
+    up_mask = (df[logfc_col] >  lfc_thresh) & (df[padj_col] < p_thresh)
+    dn_mask = (df[logfc_col] < -lfc_thresh) & (df[padj_col] < p_thresh)
     df["_cat"] = "Non-significant"
-    df.loc[up, "_cat"] = "Up-regulated"
-    df.loc[dn, "_cat"] = "Down-regulated"
+    df.loc[up_mask, "_cat"] = "Up-regulated"
+    df.loc[dn_mask, "_cat"] = "Down-regulated"
+
+    n_up  = int(up_mask.sum())
+    n_dn  = int(dn_mask.sum())
+    n_sig = n_up + n_dn
+
+    # ── Keep ONLY significant genes in the plot ───────────────────────────────
+    df = df[df["_cat"] != "Non-significant"].copy()
+    if df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No significant genes at current thresholds.",
+                           xref="paper", yref="paper", x=0.5, y=0.5,
+                           showarrow=False, font=dict(size=13, color="#888"))
+        fig.update_layout(template="simple_white",
+                          xaxis_title="Log2 Fold Change",
+                          yaxis_title="−log10(Adj. p-value)")
+        return fig
+
+    df[gene_col] = df[gene_col].astype(str)
+    has_base = "baseMean" in df.columns
 
     color_map = {
-        "Up-regulated":    "#e74c3c",
-        "Down-regulated":  "#3498db",
-        "Non-significant": "#c8c8c8",
+        "Up-regulated":   "#e74c3c",
+        "Down-regulated": "#3498db",
     }
-
-    has_base = "baseMean" in df.columns
-    # ── Decimation: keep all significant + top non-sig by p-value (max 5000 total) ──
-    PLOT_CAP = 5000
-    if len(df) > PLOT_CAP:
-        sig_mask = df["_cat"] != "Non-significant"
-        sig_df   = df[sig_mask]
-        ns_df    = df[~sig_mask]
-        ns_slots = max(0, PLOT_CAP - len(sig_df))
-        ns_df    = ns_df.nsmallest(ns_slots, padj_col) if ns_slots > 0 else ns_df.iloc[0:0]
-        df = pd.concat([sig_df, ns_df], ignore_index=True)
 
     fig = go.Figure()
 
@@ -76,32 +90,27 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
         sub = df[df["_cat"] == cat]
         if sub.empty:
             continue
-        # customdata[:, 0] = gene symbol (UPPERCASE) — consumed by _genes_from_selected
-        # and passed to the enrichment pipeline as-is.
-        # col-1 kept as baseMean (or 0) so hover template stays consistent.
         syms      = sub[gene_col].astype(str).str.strip().str.upper().values
         base_vals = sub["baseMean"].values if has_base else np.zeros(len(sub))
         customdata = np.column_stack([syms, base_vals])
         ht = ("<b>%{customdata[0]}</b><br>"
               "Log2FC: %{x:.3f}<br>"
-              "−log10(p): %{y:.2f}<br>")
+              "−log10(adj.p): %{y:.2f}<br>")
         if has_base:
             ht += "BaseMean: %{customdata[1]:.1f}"
         ht += "<extra></extra>"
-        fig.add_trace(go.Scattergl(          # WebGL — handles 50 000 points smoothly
+        fig.add_trace(go.Scattergl(
             x=sub[logfc_col], y=sub["_nlp"],
             mode="markers", name=cat,
-            marker=dict(color=color, size=6, opacity=0.75),
+            marker=dict(color=color, size=7, opacity=0.82,
+                        line=dict(width=0.4, color="white")),
             customdata=customdata,
             hovertemplate=ht,
         ))
 
-    # Ensure gene column is string before any .str operations
-    df[gene_col] = df[gene_col].astype(str)
-
-    # ── Oncogene overlay (star marker, gold border) ──────────────────────────
+    # ── Oncogene overlay (star, gold border) — only significant ──────────────
     onco_up = df[
-        up &
+        (df["_cat"] == "Up-regulated") &
         df[gene_col].str.upper().map(
             lambda g: CANCER_GENE_CENSUS.get(g, {}).get("role") == "Oncogene"
         )
@@ -115,21 +124,19 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
         ])
         fig.add_trace(go.Scattergl(
             x=onco_up[logfc_col], y=onco_up["_nlp"],
-            mode="markers+text",
-            name="Oncogene ↑",
-            text=onco_up[gene_col],
-            textposition="top center",
+            mode="markers+text", name="Oncogene ↑",
+            text=onco_up[gene_col], textposition="top center",
             textfont=dict(size=9, color="#c0392b"),
-            marker=dict(symbol="star", size=13, color="#e74c3c",
+            marker=dict(symbol="star", size=14, color="#e74c3c",
                         line=dict(color="#f39c12", width=2)),
             customdata=cd,
             hovertemplate="<b>%{customdata[0]}</b> (Oncogene)<br>"
                           "Cancer: %{customdata[1]}<extra></extra>",
         ))
 
-    # ── TSG overlay (diamond marker, blue border) ────────────────────────────
+    # ── TSG overlay (diamond, blue border) — only significant ────────────────
     tsg_dn = df[
-        dn &
+        (df["_cat"] == "Down-regulated") &
         df[gene_col].str.upper().map(
             lambda g: CANCER_GENE_CENSUS.get(g, {}).get("role") == "TSG"
         )
@@ -143,55 +150,56 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
         ])
         fig.add_trace(go.Scattergl(
             x=tsg_dn[logfc_col], y=tsg_dn["_nlp"],
-            mode="markers+text",
-            name="TSG ↓",
-            text=tsg_dn[gene_col],
-            textposition="bottom center",
+            mode="markers+text", name="TSG ↓",
+            text=tsg_dn[gene_col], textposition="bottom center",
             textfont=dict(size=9, color="#2980b9"),
-            marker=dict(symbol="diamond", size=11, color="#3498db",
+            marker=dict(symbol="diamond", size=12, color="#3498db",
                         line=dict(color="#1a5276", width=2)),
             customdata=cd2,
             hovertemplate="<b>%{customdata[0]}</b> (Tumor Suppressor)<br>"
                           "Cancer: %{customdata[1]}<extra></extra>",
         ))
 
-    # ── Drug-target stars ────────────────────────────────────────────────────
-    drug_sig = df[
-        (df["_cat"] != "Non-significant") &
-        df[gene_col].str.upper().isin(DRUG_GENE_INTERACTIONS.keys())
-    ]
-    # Exclude already-labelled oncogene/TSG to avoid clutter
-    already = set(onco_up[gene_col].str.upper().tolist() + tsg_dn[gene_col].str.upper().tolist())
-    drug_sig = drug_sig[~drug_sig[gene_col].str.upper().isin(already)]
+    # ── FDA drug-target open-circle overlay ──────────────────────────────────
+    annotated = set()
+    if not onco_up.empty:
+        annotated |= set(onco_up[gene_col].str.upper())
+    if not tsg_dn.empty:
+        annotated |= set(tsg_dn[gene_col].str.upper())
+
+    drug_sig = df[df[gene_col].str.upper().isin(DRUG_GENE_INTERACTIONS.keys())]
+    drug_sig = drug_sig[~drug_sig[gene_col].str.upper().isin(annotated)]
     if not drug_sig.empty:
-        # customdata col-0 = gene name so lasso selection captures these genes
         _drug_cd = np.column_stack([
             drug_sig[gene_col].values,
             np.zeros(len(drug_sig)),
         ])
         fig.add_trace(go.Scattergl(
             x=drug_sig[logfc_col], y=drug_sig["_nlp"],
-            mode="markers",
-            name="Drug target",
-            marker=dict(symbol="circle-open", size=14, color="#27ae60",
+            mode="markers", name="Drug target",
+            marker=dict(symbol="circle-open", size=15, color="#27ae60",
                         line=dict(color="#27ae60", width=2)),
             customdata=_drug_cd,
             hovertemplate="<b>%{customdata[0]}</b> — FDA drug target<extra></extra>",
         ))
 
-    # ── Threshold lines ──────────────────────────────────────────────────────
-    fig.add_hline(y=-np.log10(p_thresh), line_dash="dash", line_color="gray", opacity=0.45)
-    fig.add_vline(x= lfc_thresh,         line_dash="dash", line_color="gray", opacity=0.45)
-    fig.add_vline(x=-lfc_thresh,         line_dash="dash", line_color="gray", opacity=0.45)
+    # ── Threshold reference lines ─────────────────────────────────────────────
+    fig.add_hline(y=-np.log10(p_thresh), line_dash="dash",
+                  line_color="gray", opacity=0.4,
+                  annotation_text=f"p={p_thresh}", annotation_position="right",
+                  annotation_font_size=9)
+    fig.add_vline(x= lfc_thresh, line_dash="dash", line_color="gray", opacity=0.4)
+    fig.add_vline(x=-lfc_thresh, line_dash="dash", line_color="gray", opacity=0.4)
 
-    # ── Label top significant (non-annotated) ────────────────────────────────
+    # ── Label top non-annotated significant genes ─────────────────────────────
+    already_labelled = annotated.copy()
+    if not drug_sig.empty:
+        already_labelled |= set(drug_sig[gene_col].str.upper())
+
     sig_rest = df[
-        (df["_cat"] != "Non-significant") &
-        ~df[gene_col].str.upper().isin(
-            set(onco_up[gene_col].str.upper().tolist()) | set(tsg_dn[gene_col].str.upper().tolist())
-        )
-    ].nlargest(8, "_nlp")
-    for rec in sig_rest[["_nlp", logfc_col, gene_col]].to_dict("records"):
+        ~df[gene_col].str.upper().isin(already_labelled)
+    ].nlargest(15, "_nlp")
+    for rec in sig_rest[[logfc_col, "_nlp", gene_col]].to_dict("records"):
         fig.add_annotation(
             x=rec[logfc_col], y=rec["_nlp"],
             text=str(rec[gene_col]),
@@ -200,29 +208,27 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
 
     fig.update_layout(
         template="simple_white",
-        title=dict(text="Volcano Plot  <span style='font-size:11px;color:#888;'>"
-                        "★ Oncogene  ◆ TSG  ○ Drug target  "
-                        "— lasso or box-select to run enrichment</span>",
-                   font=dict(size=14)),
+        title=dict(
+            text=(
+                f"Significant Genes  "
+                f"<span style='color:#e74c3c'>▲ {n_up} up</span>  "
+                f"<span style='color:#3498db'>▼ {n_dn} down</span>  "
+                f"<span style='font-size:11px;color:#888;'>"
+                f"★ Oncogene  ◆ TSG  ○ Drug target  "
+                f"— lasso or box-select to run enrichment</span>"
+            ),
+            font=dict(size=13),
+        ),
         xaxis_title="Log2 Fold Change",
         yaxis_title="−log10(Adj. p-value)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=11)),
-        dragmode="select",           # default tool = box-select; user can switch to lasso
-        clickmode="event+select",    # enable both click and select events
-        hovermode="closest",         # WebGL layer captures hover/click on nearest point
-        margin=dict(t=60),
-        # Pre-declare the selections array and newselection style so Plotly.js
-        # registers them as known schema properties before the user draws anything.
-        # Without this initialisation, every user-drawn box/lasso triggers a cascade
-        # of "unrecognized GUI edit: selections[0].xref/yref/type/…" console warnings.
+        dragmode="select",
+        clickmode="event+select",
+        hovermode="closest",
+        margin=dict(t=65),
         selections=[],
-        newselection=dict(
-            line=dict(color="#3498db", width=1, dash="dot"),
-        ),
-        activeselection=dict(
-            fillcolor="#3498db",
-            opacity=0.07,
-        ),
+        newselection=dict(line=dict(color="#3498db", width=1, dash="dot")),
+        activeselection=dict(fillcolor="#3498db", opacity=0.07),
     )
     return fig
 
@@ -266,66 +272,241 @@ def create_meta_score_bar(df: pd.DataFrame) -> go.Figure:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def create_pathway_bubble(enr: pd.DataFrame) -> go.Figure:
+    """
+    Industry-standard enrichment bubble chart (ClusterProfiler / enrichplot style).
+
+    Axes  : X = GeneRatio (overlap / query size)  — biological coverage
+    Size  : √(overlap_count) × 4 — absolute hit count, sqrt-scaled
+    Color : −log10(adjusted_p_value) — statistical significance
+    Shape : direction (▲ Activated, ▼ Inhibited, ● Inconclusive)
+    """
     if enr is None or enr.empty:
         return blank("No significant pathways found.")
 
-    top = enr.head(15).copy()
-    top["nlp"]   = -np.log10(top["adjusted_p_value"].clip(lower=1e-300))
-    top["label"] = top["pathway"].str[:52]
-    if "database" in top.columns:
-        db_short = top["database"].str.upper().str[:3]
-        top["label"] = db_short + " · " + top["label"]
+    top = enr.head(20).copy()
+    top["nlp"] = -np.log10(top["adjusted_p_value"].clip(lower=1e-300))
 
-    fig = go.Figure(go.Scattergl(
-        x=top["enrichment_score"], y=top["label"],
+    # X-axis: GeneRatio if available, else fall back to enrichment_score
+    x_col   = "gene_ratio"   if "gene_ratio"   in top.columns else "enrichment_score"
+    x_title = "Gene Ratio (overlap / query size)" if x_col == "gene_ratio" \
+              else "−log10(Adj. p-value)"
+
+    # Pathway labels with database prefix
+    top["label"] = top["pathway"].str[:50]
+    if "database" in top.columns:
+        top["label"] = top["database"].str.upper().str[:3] + " · " + top["label"]
+
+    # Sort by GeneRatio descending so highest-coverage pathways appear at top
+    top = top.sort_values(x_col, ascending=False).reset_index(drop=True)
+    # Reverse for horizontal layout (highest at top of y-axis)
+    top = top[::-1].reset_index(drop=True)
+
+    # Bubble sizes: √(overlap) — avoids extreme spread on large pathways
+    sizes = np.sqrt(top["overlap_count"].clip(lower=1)) * 4.5
+    sizes = np.clip(sizes, 8, 45)
+
+    # Direction → marker symbol (Plotly supports per-point symbol arrays)
+    has_dir = "direction" in top.columns
+    if has_dir:
+        sym_map = {"Activated": "triangle-up",
+                   "Inhibited": "triangle-down",
+                   "Inconclusive": "circle"}
+        symbols = top["direction"].map(sym_map).fillna("circle").tolist()
+    else:
+        symbols = "circle"
+
+    # Optional extra hover columns
+    has_or  = "odds_ratio"            in top.columns
+    has_az  = "activation_zscore"     in top.columns
+    has_ews = "effect_weighted_score" in top.columns
+    has_gr  = "gene_ratio"            in top.columns
+
+    # Build customdata array — up to 6 columns
+    cd_cols  = ["overlap_count", "pathway_size", "adjusted_p_value"]
+    cd_extra = []
+    if has_or:  cd_extra.append("odds_ratio")
+    if has_az:  cd_extra.append("activation_zscore")
+    if has_dir: cd_extra.append("direction")
+    all_cd = cd_cols + cd_extra
+    customdata = top[all_cd].values
+
+    # Build hover template
+    ht_lines = [
+        "<b>%{y}</b>",
+        "Gene Ratio: %{x:.3f}" if x_col == "gene_ratio" else "Score: %{x:.2f}",
+        "Overlap: %{customdata[0]:.0f} / %{customdata[1]:.0f}",
+        "Adj. p: %{customdata[2]:.2e}",
+    ]
+    idx = 3
+    if has_or:
+        ht_lines.append(f"Odds Ratio: %{{customdata[{idx}]:.2f}}")
+        idx += 1
+    if has_az:
+        ht_lines.append(f"Activation z: %{{customdata[{idx}]:.2f}}")
+        idx += 1
+    if has_dir:
+        ht_lines.append(f"Direction: %{{customdata[{idx}]}}")
+    hover_template = "<br>".join(ht_lines) + "<extra></extra>"
+
+    fig = go.Figure(go.Scatter(
+        x=top[x_col],
+        y=top["label"],
         mode="markers",
         marker=dict(
-            size=np.clip(top["overlap_count"] * 6, 8, 55),
+            size=sizes,
             color=top["nlp"],
-            colorscale="RdYlBu", reversescale=True,
+            colorscale="Viridis",
+            reversescale=False,
             showscale=True,
-            colorbar=dict(title="−log10 p", thickness=12),
+            colorbar=dict(
+                title=dict(text="−log10<br>adj. p", side="right"),
+                thickness=13, len=0.7,
+            ),
+            symbol=symbols,
+            line=dict(width=1, color="white"),
         ),
-        text=top.get("genes", top["pathway"]),
-        customdata=top[["overlap_count", "pathway_size", "adjusted_p_value"]].values,
-        hovertemplate=(
-            "<b>%{y}</b><br>Enrich. Score: %{x:.1f}<br>"
-            "Overlap: %{customdata[0]}/%{customdata[1]}<br>"
-            "Adj. p: %{customdata[2]:.2e}<extra></extra>"
-        ),
+        customdata=customdata,
+        hovertemplate=hover_template,
     ))
+
+    # Direction legend annotations (top-right corner)
+    if has_dir:
+        dir_legend = (
+            "▲ Activated  ▼ Inhibited  ● Inconclusive"
+        )
+        fig.add_annotation(
+            text=dir_legend, xref="paper", yref="paper",
+            x=1.0, y=-0.06, showarrow=False,
+            font=dict(size=9, color="#555"), xanchor="right",
+        )
+
     fig.update_layout(
         template="simple_white",
-        title="Pathway Enrichment Bubble",
-        xaxis_title="Enrichment Score (−log10 p)",
-        yaxis=dict(autorange="reversed"),
-        height=440, margin=dict(l=10, r=10, t=45, b=30),
+        title=dict(
+            text="Pathway Enrichment  "
+                 "<span style='font-size:11px;color:#888;'>"
+                 "X=GeneRatio · Size=Overlap · Color=Significance · "
+                 "Shape=Direction</span>",
+            font=dict(size=13),
+        ),
+        xaxis=dict(title=x_title, rangemode="tozero"),
+        yaxis=dict(showgrid=True, gridcolor="#f0f0f0"),
+        height=max(360, 28 * len(top) + 80),
+        margin=dict(l=10, r=20, t=50, b=50),
     )
     return fig
 
 
 def create_pathway_bar(enr: pd.DataFrame) -> go.Figure:
+    """
+    IPA-style directional bar chart.
+
+    Color : Activated = #c0392b (red), Inhibited = #2980b9 (blue),
+            Inconclusive = #7f8c8d (gray)
+    X-axis: −log10(Adj. p-value)
+    Text  : overlap count + gene ratio %
+    """
     if enr is None or enr.empty:
         return blank("No pathways enriched.")
 
-    top = enr.head(12).copy()
+    top = enr.head(15).copy()
     top["nlp"]   = -np.log10(top["adjusted_p_value"].clip(lower=1e-300))
-    top["label"] = top["pathway"].str[:50]
+    top["label"] = top["pathway"].str[:48]
+
+    # Direction-based bar colors
+    dir_color_map = {
+        "Activated":    "#c0392b",
+        "Inhibited":    "#2980b9",
+        "Inconclusive": "#7f8c8d",
+    }
+    has_dir = "direction" in top.columns
+    if has_dir:
+        colors = top["direction"].map(dir_color_map).fillna("#7f8c8d").tolist()
+    else:
+        colors = "#2c3e50"
+
+    # Text: "N genes (GR: X.X%)"
+    has_gr = "gene_ratio" in top.columns
+    if has_gr:
+        bar_text = (
+            top["overlap_count"].astype(str)
+            + " (" + (top["gene_ratio"] * 100).round(1).astype(str) + "%)"
+        )
+    else:
+        bar_text = top["overlap_count"].astype(str) + " genes"
+
+    # Odds ratio for hover
+    has_or = "odds_ratio" in top.columns
+    has_az = "activation_zscore" in top.columns
+
+    # Reverse for horizontal bars: want highest significance at top
+    top_r  = top.iloc[::-1].reset_index(drop=True)
+    c_rev  = colors[::-1] if isinstance(colors, list) else colors
+    bt_rev = bar_text.iloc[::-1].reset_index(drop=True)
+
+    cd_cols = ["adjusted_p_value", "overlap_count"]
+    if has_or:  cd_cols.append("odds_ratio")
+    if has_az:  cd_cols.append("activation_zscore")
+    if has_dir: cd_cols.append("direction")
+    customdata = top_r[cd_cols].values
+
+    ht_lines = [
+        "<b>%{y}</b>",
+        "−log10 adj.p: %{x:.2f}",
+        "Adj. p: %{customdata[0]:.2e}",
+        "Overlap: %{customdata[1]:.0f} genes",
+    ]
+    idx = 2
+    if has_or:
+        ht_lines.append(f"Odds Ratio: %{{customdata[{idx}]:.2f}}")
+        idx += 1
+    if has_az:
+        ht_lines.append(f"Activation z: %{{customdata[{idx}]:.2f}}")
+        idx += 1
+    if has_dir:
+        ht_lines.append(f"Direction: %{{customdata[{idx}]}}")
+    hover_template = "<br>".join(ht_lines) + "<extra></extra>"
 
     fig = go.Figure(go.Bar(
-        x=top["nlp"][::-1], y=top["label"][::-1],
+        x=top_r["nlp"],
+        y=top_r["label"],
         orientation="h",
-        marker=dict(color=top["enrichment_score"][::-1],
-                    colorscale="Blues", showscale=False),
-        text=top["overlap_count"][::-1].astype(str) + " genes",
+        marker=dict(
+            color=c_rev,
+            line=dict(color="white", width=0.5),
+        ),
+        text=bt_rev,
         textposition="inside",
-        hovertemplate="<b>%{y}</b><br>−log10 p: %{x:.2f}<extra></extra>",
+        insidetextanchor="start",
+        textfont=dict(size=10, color="white"),
+        customdata=customdata,
+        hovertemplate=hover_template,
     ))
+
+    # Direction color legend as annotation
+    if has_dir:
+        fig.add_annotation(
+            text=(
+                "<span style='color:#c0392b'>■ Activated</span>  "
+                "<span style='color:#2980b9'>■ Inhibited</span>  "
+                "<span style='color:#7f8c8d'>■ Inconclusive</span>"
+            ),
+            xref="paper", yref="paper",
+            x=0.5, y=-0.08,
+            showarrow=False, font=dict(size=9), xanchor="center",
+        )
+
     fig.update_layout(
         template="simple_white",
-        title="Top Enriched Pathways",
+        title=dict(
+            text="Top Enriched Pathways  "
+                 "<span style='font-size:11px;color:#888;'>"
+                 "color = activation direction</span>",
+            font=dict(size=13),
+        ),
         xaxis_title="−log10(Adj. p-value)",
-        height=380, margin=dict(l=10, r=10, t=45, b=30),
+        height=max(340, 26 * len(top) + 80),
+        margin=dict(l=10, r=10, t=50, b=55),
     )
     return fig
 

@@ -263,6 +263,9 @@ def _run_enrichment(
     if len(df) > 1:
         _, adj = multipletests(df["p_value"], method=correction)[:2]
         df["adjusted_p_value"] = adj
+    # Recompute enrichment_score from the BH-corrected value so bubble/bar
+    # charts always reflect FDR-adjusted significance, never raw p-value.
+    df["enrichment_score"] = -np.log10(df["adjusted_p_value"].clip(lower=1e-300))
     df = df.sort_values("adjusted_p_value").reset_index(drop=True)
     return df
 

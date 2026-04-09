@@ -403,25 +403,80 @@ def _section_head(icon: str, title: str, subtitle: str = "") -> html.Div:
 def _enr_table(enr: pd.DataFrame) -> html.Div:
     if enr is None or enr.empty:
         return html.P("No significant pathways.", className="text-muted small ps-1")
-    cols = [c for c in ["pathway", "database", "overlap_count", "pathway_size",
-                         "adjusted_p_value", "genes"]
-            if c in enr.columns]
-    d = enr[cols].head(20).copy()
-    d["adjusted_p_value"] = d["adjusted_p_value"].map("{:.2e}".format)
+
+    # Ordered preferred columns — skip any not in the result
+    preferred = [
+        "pathway", "database",
+        "overlap_count", "gene_ratio",
+        "adjusted_p_value", "odds_ratio",
+        "direction", "activation_zscore",
+        "effect_weighted_score", "genes",
+    ]
+    cols = [c for c in preferred if c in enr.columns]
+
+    d = enr[cols].head(25).copy()
+
+    # Format numerics
+    if "adjusted_p_value"      in d.columns:
+        d["adjusted_p_value"]      = d["adjusted_p_value"].map("{:.2e}".format)
+    if "gene_ratio"            in d.columns:
+        d["gene_ratio"]            = d["gene_ratio"].map(lambda v: f"{float(v)*100:.1f}%")
+    if "odds_ratio"            in d.columns:
+        d["odds_ratio"]            = d["odds_ratio"].map(lambda v: f"{float(v):.2f}")
+    if "activation_zscore"     in d.columns:
+        d["activation_zscore"]     = d["activation_zscore"].map(lambda v: f"{float(v):+.2f}")
+    if "effect_weighted_score" in d.columns:
+        d["effect_weighted_score"] = d["effect_weighted_score"].map(lambda v: f"{float(v):.1f}")
+    if "genes"                 in d.columns:
+        d["genes"]                 = d["genes"].str[:80]
+
+    col_labels = {
+        "pathway":               "Pathway",
+        "database":              "DB",
+        "overlap_count":         "Overlap",
+        "gene_ratio":            "Gene Ratio",
+        "adjusted_p_value":      "Adj. p",
+        "odds_ratio":            "OR",
+        "direction":             "Direction",
+        "activation_zscore":     "z-score",
+        "effect_weighted_score": "Effect Score",
+        "genes":                 "Genes (overlap)",
+    }
+
+    # Conditional row coloring by direction
+    dir_style = []
+    if "direction" in d.columns:
+        recs = d.to_dict("records")
+        for i, rec in enumerate(recs):
+            dirn = str(rec.get("direction", ""))
+            if dirn == "Activated":
+                dir_style.append({"if": {"row_index": i},
+                                  "backgroundColor": "#fdf2f8", "color": "#922b21"})
+            elif dirn == "Inhibited":
+                dir_style.append({"if": {"row_index": i},
+                                  "backgroundColor": "#ebf5fb", "color": "#1a5276"})
+
     return dash_table.DataTable(
         data=d.to_dict("records"),
-        columns=[{"name": c.replace("_", " ").title(), "id": c} for c in cols],
-        style_table={"overflowX": "auto", "maxHeight": "320px", "overflowY": "auto"},
+        columns=[{"name": col_labels.get(c, c.replace("_", " ").title()), "id": c}
+                 for c in cols],
+        style_table={"overflowX": "auto", "maxHeight": "360px", "overflowY": "auto"},
         style_cell={"fontSize": 11, "padding": "3px 8px", "textAlign": "left",
-                    "maxWidth": "200px", "overflow": "hidden", "textOverflow": "ellipsis"},
+                    "maxWidth": "180px", "overflow": "hidden",
+                    "textOverflow": "ellipsis", "whiteSpace": "nowrap"},
         style_header={"backgroundColor": "#1a5276", "color": "white",
                       "fontWeight": "bold", "fontSize": 11},
-        style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#f4f6f7"}],
+        style_data_conditional=[
+            {"if": {"row_index": "odd"}, "backgroundColor": "#f8f9fa"},
+            *dir_style,
+        ],
         page_size=10,
+        sort_action="native",
+        filter_action="native",
         tooltip_delay=0,
         tooltip_duration=None,
         tooltip_data=[
-            {c: {"value": str(rec[c]), "type": "markdown"} for c in cols}
+            {c: {"value": str(rec.get(c, "")), "type": "markdown"} for c in cols}
             for rec in d.to_dict("records")
         ],
     )
