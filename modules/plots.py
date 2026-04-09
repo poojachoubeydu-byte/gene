@@ -214,8 +214,7 @@ def create_volcano_plot(df, logfc_col, padj_col, gene_col,
                 f"<span style='color:#e74c3c'>▲ {n_up} up</span>  "
                 f"<span style='color:#3498db'>▼ {n_dn} down</span>  "
                 f"<span style='font-size:11px;color:#888;'>"
-                f"★ Oncogene  ◆ TSG  ○ Drug target  "
-                f"— lasso or box-select to run enrichment</span>"
+                f"★ Oncogene  ◆ TSG  ○ Drug target</span>"
             ),
             font=dict(size=13),
         ),
