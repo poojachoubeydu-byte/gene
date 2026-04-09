@@ -1331,9 +1331,19 @@ def cb_volcano_enr(sig_rec, db, enr_mode, active_tab, rec):
         strict     = (enr_mode != "relaxed")
 
         # ── Gene extraction: all significant genes from sig-store ─────────
-        genes = _s2df(sig_rec)["symbol"].map(_clean_sym).tolist()
+        # ORA (Fisher exact) requires a focused query list to detect enrichment.
+        # When query_size / background > ~5 %, expected overlap ≈ actual overlap
+        # and OR ≈ 1 → no significant pathways. Cap at top 500 by padj so the
+        # test has statistical power while still reflecting the full DEG result.
+        MAX_ORA_GENES = 500
+        sig_df    = _s2df(sig_rec)
+        n_total   = len(sig_df)
+        capped    = n_total > MAX_ORA_GENES
+        if capped:
+            sig_df = sig_df.nsmallest(MAX_ORA_GENES, "padj")
+        genes = sig_df["symbol"].map(_clean_sym).tolist()
 
-        log.info(f"global enrichment  n_genes={len(genes)}")
+        log.info(f"global enrichment  n_sig={n_total}  n_query={len(genes)}  capped={capped}")
 
         # ── Build LFC / NLP maps (use full df, not decimated plot) ───────
         ref = df.copy()
@@ -1412,7 +1422,10 @@ def cb_volcano_enr(sig_rec, db, enr_mode, active_tab, rec):
         counter = html.Div([
             *warn_block,
             html.Small(
-                f"🌍 Global Enrichment · {len(genes):,} significant genes",
+                (f"🧬 Global Enrichment · Top 500 Significant Genes "
+                 f"(concentrated signal from {n_total:,} total)")
+                if capped else
+                f"🧬 Global Enrichment · {n_total:,} Significant Genes",
                 className="text-muted fw-semibold",
             ),
             mode_badge,
